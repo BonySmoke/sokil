@@ -1,0 +1,15 @@
+# Deny-all, then allow just what the image needs. The repo carries several GB of
+# videos, datasets and training runs; an allow-list keeps them out of the build
+# context by default instead of relying on remembering to exclude each one.
+*
+
+!sokil/
+!pyproject.toml
+!uv.lock
+!README.md
+
+# Re-excluded after the allow-list above, which would otherwise pull these in
+# from the directories it re-includes.
+**/__pycache__/
+**/*.pyc
+**/.DS_Store

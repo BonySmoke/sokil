@@ -1,0 +1,79 @@
+[project]
+name = "sokil"
+version = "0.1.0"
+description = "Instant Review System for Badminton"
+authors = [{ name = "Oleh Neichev" }]
+requires-python = ">=3.13,<4"
+readme = "README.md"
+license = "AGPL-3.0"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "opencv-python",
+    "matplotlib",
+    "scikit-learn",
+    "torch",
+    "torchvision",
+    "shapely",
+    "pandas",
+    "lap",
+    "typer",
+    "platformdirs",
+    "pyyaml",
+    "python-dotenv",
+    "onnx>=1.22.0",
+    "onnxruntime>=1.28.0",
+    "ultralytics>=8.4.127",
+    "imageio-ffmpeg>=0.6.0",
+]
+
+[project.scripts]
+sokil = "sokil.cli:app"
+
+[dependency-groups]
+dev = [
+    "jupyter",
+    "ipykernel",
+    "cvat-sdk==2.75.0", # keep it in sync with the actual CVAT instance deployed in infra
+]
+
+lint = ["ruff==0.16.6"]
+
+test = ["pytest>=8.4", "pytest-cov>=7.0"]
+
+[tool.uv]
+default-groups = "all"
+
+# CPU is the primary inference target;
+# therefore, install the CPU index of PyTorch to avoid pulling CUDA
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[tool.coverage.run]
+source = ["sokil"]
+# Test only the main package excluding training and calibration helpers
+omit = ["sokil/training/*", "sokil/calibration/*", "sokil/cli.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+extend-exclude = ["docs", "notebooks"]
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+source-include = ["sokil/models.yaml", "sokil/training/training.yaml"]

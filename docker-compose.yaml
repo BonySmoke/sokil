@@ -1,0 +1,17 @@
+name: sokil
+
+services:
+  sokil:
+    build:
+      context: .
+    image: ${SOKIL_IMAGE:-sokil:dev}
+    volumes:
+      - ${SOKIL_DATA:-.}:/data
+      # Weights are downloaded on first use; the named volume keeps them
+      # between runs so later reviews start immediately.
+      - models:/cache
+    # Keeps output files owned by you rather than by the image's uid 1000.
+    user: "${SOKIL_UID:-1000}:${SOKIL_GID:-1000}"
+
+volumes:
+  models:

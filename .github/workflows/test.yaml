@@ -1,0 +1,41 @@
+name: Test
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --no-default-groups --group test
+
+      # Headless: matplotlib picks a backend at import, and the runner has no
+      # display for it to find.
+      - name: Unit tests
+        env:
+          MPLBACKEND: Agg
+        run: uv run --no-sync pytest --cov --cov-report=term-missing
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo '### Coverage'
+            echo '```'
+            uv run --no-sync coverage report
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

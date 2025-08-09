@@ -1,0 +1,38 @@
+# Which trained weights this code expects.
+#
+# Publishing a new version: see docs/training.md.
+
+# The GitHub repository whose releases carry the assets. SOKIL_MODELS_REPO
+# overrides it, e.g. to fetch from a fork.
+repo: BonySmoke/sokil
+
+models:
+  shuttle:
+    # Version label. Used for the cache path and for logs; the checksum below
+    # is what actually identifies a file. New releases are dated YYYY-MM-DD.
+    # Quote it: an unquoted date is YAML for a date object, not a string.
+    version: "v1"
+    release_tag: models-v1
+    asset: shuttle-detect.pt
+
+    # sha256 of the published asset, from `sokil models pin`. Left empty, a
+    # download still proceeds but is unverified and says so.
+    sha256:
+
+    # What these weights were trained to be fed.
+    expects:
+      imgsz: 640
+      grayscale: true
+      classes:
+        - Shuttlecock
+
+  court:
+    version: "v1"
+    release_tag: models-v1
+    asset: court-segment.pt
+    sha256:
+    expects:
+      imgsz: 640
+      grayscale: true
+      classes:
+        - Court

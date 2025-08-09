@@ -1,0 +1,42 @@
+# Per-model training defaults.
+#
+# Edit these rather than passing the same flags on every command line: the CLI
+# falls back to whatever is set here, and an explicit flag still wins for a
+# one-off run. Point SOKIL_TRAINING_CONFIG at another file to use a different
+# set entirely, e.g. to keep an experiment's settings beside its results.
+#
+# Every model needs all the keys below; an unknown key is an error rather than
+# being ignored, so a typo surfaces on load instead of silently keeping the
+# built-in default.
+
+models:
+  shuttle:
+    # CVAT project and label the annotation tasks are created under. The label
+    # also becomes the single class name in the exported data.yaml.
+    project: Badminton Shuttle Detection
+    label: Shuttlecock
+    label_type: rectangle
+
+    # Grayscale generalises across feather and plastic shuttles, so the export
+    # converts every frame and inference feeds the same conversion.
+    grayscale: true
+
+    # Starting weights for a fresh run. A bare name is downloaded by
+    # ultralytics; a path is loaded from disk.
+    weights: training/yolo11n.pt
+
+    # Training runs square: the trainer coerces a rectangular size to its
+    # larger side, so the 640x480 frames are padded to 640x640.
+    imgsz: 640
+
+    batch: 16
+
+  court:
+    project: Badminton Court Segmentation
+    label: Court
+    label_type: polygon
+    grayscale: true
+
+    weights: training/yolo11s-seg.pt
+    imgsz: 640
+    batch: 16

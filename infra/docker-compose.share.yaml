@@ -1,0 +1,11 @@
+# Optional overlay: expose a host directory as CVAT's file share.
+
+name: cvat
+
+volumes:
+  cvat_share:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${CVAT_SHARE_PATH:?set CVAT_SHARE_PATH to the host directory CVAT should expose as its file share}
