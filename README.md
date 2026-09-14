@@ -2,17 +2,20 @@
 
 # 🐦 Sokil
 
-A monocular computer-vision system to make badminton line calls.
+A monocular computer-vision system for calling badminton lines.
 
-`Sokil` is the Ukrainian word for `falcon`, a bird that can see up to ~129 frames per second.
+`Sokil` is the Ukrainian word for `falcon`, a bird that can see up to `~129` frames per second.
+
+The name is inspired by the famous `Hawk-Eye` system used in many sports for automated officiating.
 
 ## Demo
 
-Here's a short demo of `Sokil` for singles court boundaries
+The analysis below is for a singles match:
 
 ![Sokil short demo](./assets/demo.gif)
 
-You can see a full video explaining each stage of the analysis [here](./assets/demo.mp4)
+Below is a breakdown of the analysis process:
+https://github.com/user-attachments/assets/01050134-b837-421f-852b-73d43c5e15da
 
 ## 💡 Motivation
 
