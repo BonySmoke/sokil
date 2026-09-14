@@ -15,6 +15,7 @@ The analysis below is for a singles match:
 ![Sokil short demo](./assets/demo.gif)
 
 Below is a breakdown of the analysis process:
+
 https://github.com/user-attachments/assets/01050134-b837-421f-852b-73d43c5e15da
 
 ## 💡 Motivation
