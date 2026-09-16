@@ -133,13 +133,16 @@ def review(
     if court_sample_seconds <= 0:
         raise typer.BadParameter("--court-sample-seconds must be positive")
 
-    court_segmentation_model = Segmenter(court_segmentation_model_path)
-
     # The weights declare the frames they were trained on, so the pipeline
     # honours that instead of assuming. A pair that disagrees can only be fed
     # one way, so the shuttle detector wins: it is the one that runs per frame.
     shuttle_expects = model_spec(ModelName.SHUTTLE).expects
     court_expects = model_spec(ModelName.COURT).expects
+
+    court_segmentation_model = Segmenter(
+        court_segmentation_model_path, imgsz=court_expects.get("imgsz", 640)
+    )
+
     if shuttle_expects.get("grayscale") != court_expects.get("grayscale"):
         logging.getLogger(__name__).warning(
             "The models disagree on grayscale input; using the shuttle "
@@ -161,6 +164,7 @@ def review(
         grayscale=shuttle_expects.get("grayscale", True),
         shuttle_detector_kwargs={
             "model": shuttle_detector_model_path,
+            "imgsz": shuttle_expects.get("imgsz", 640),
         },
         camera_intrinsics_path=camera_intrinsics_path,
         camera_dist_path=camera_dist_path,
@@ -336,6 +340,46 @@ def models_pin(
 
     if exit_code:
         raise typer.Exit(code=exit_code)
+
+
+@models_app.command("export-onnx")
+def models_export_onnx(
+    model: Annotated[str, typer.Option(help="The model the weights belong to")],
+    weights: Annotated[
+        str,
+        typer.Option(help="The .pt weights to export, e.g. models/shuttle-detect.pt"),
+    ],
+    verbose: Annotated[bool, typer.Option(help="Enable debug logging")] = False,
+):
+    """
+    Export PyTorch weights to ONNX.
+
+    The image size comes from the model's expects block in the manifest
+    """
+    from pathlib import Path
+
+    from ultralytics import YOLO
+
+    from sokil.settings import ModelResolutionError, model_spec
+
+    configure_logging(verbose, keep=("ultralytics",))
+
+    path = Path(weights)
+    if not path.is_file():
+        raise typer.BadParameter(f"No such file: {path}")
+
+    try:
+        spec = model_spec(model)
+    except ModelResolutionError as error:
+        raise typer.BadParameter(str(error))
+
+    imgsz = spec.expects.get("imgsz")
+    if imgsz is None:
+        raise typer.BadParameter(f"The manifest gives no expects.imgsz for {spec}")
+
+    # simplify needs onnxslim, which ultralytics would pip-install on the spot
+    exported = YOLO(str(path)).export(format="onnx", imgsz=imgsz, simplify=False)
+    typer.echo(exported)
 
 
 @models_app.command("clear-cache")
