@@ -33,7 +33,7 @@ This is what `Sokil` aims to solve.
 Before using the system you need to perform these steps:
 
 1. Set up the camera in your hall and record a few dozen clips.
-Refer to [./docs/camera-setup.md](./docs/camera-setup.md) for more details.
+Refer to [docs/camera-setup.md](./docs/camera-setup.md) for more details.
 
 2. Train the court and shuttle models per [./docs/training.md](./docs/training.md).
 
@@ -41,7 +41,7 @@ Refer to [./docs/camera-setup.md](./docs/camera-setup.md) for more details.
 
 You can run `Sokil` either as a Python package on your local system or as a process in a Docker container.
 
-Refer to [./docs/usage.md](./docs/usage.md) for more details.
+Refer to [docs/usage.md](./docs/usage.md) for more details.
 
 ## ✨ Features
 
