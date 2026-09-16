@@ -23,12 +23,14 @@ class Model:
         model_path: str | Path,
         confidence: float = 0.25,
         device: str | None = None,
+        imgsz: int = 640,
     ):
         from ultralytics import YOLO
 
         self.model_path = str(model_path)
         self.confidence = confidence
         self.device = device
+        self.imgsz = imgsz
         self.model = YOLO(self.model_path, task=self.task)
 
     def predict(self, image: np.ndarray, confidence: float | None = None):
@@ -40,6 +42,8 @@ class Model:
         """
         kwargs = {
             "conf": self.confidence if confidence is None else confidence,
+            "imgsz": self.imgsz,
+            "rect": False,
             "verbose": False,
         }
         if self.device:

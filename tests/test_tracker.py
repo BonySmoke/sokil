@@ -18,10 +18,11 @@ WIDTH, HEIGHT = 160, 120
 class ScriptedDetector:
     """Returns the box scripted for each frame, in order; None means no shuttle."""
 
-    def __init__(self, model, confidence=None, device=None):
+    def __init__(self, model, confidence=None, device=None, imgsz=None):
         self.model = model
         self.confidence = confidence
         self.device = device
+        self.imgsz = imgsz
         self.boxes = []
         self.seen = []
 
@@ -74,6 +75,13 @@ class TestConstruction:
 
         assert tracker.detector.device == "cuda:0"
         assert tracker.detector.confidence == 0.7
+
+    def test_the_detector_gets_the_image_size_it_was_trained_on(self, monkeypatch):
+        monkeypatch.setattr(tracker_module, "ShuttleDetector", ScriptedDetector)
+
+        tracker = ShuttleTracker({"model": "weights.pt", "imgsz": 960})
+
+        assert tracker.detector.imgsz == 960
 
     def test_the_kalman_filter_is_set_up_for_position_and_velocity(self, tracker):
         kalman = tracker._new_kalman()

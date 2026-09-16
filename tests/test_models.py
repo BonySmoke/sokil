@@ -110,6 +110,15 @@ class TestModel:
 
         assert model.model.calls[0][1]["conf"] == 0.4
 
+    def test_frames_are_letterboxed_to_a_full_square(self):
+        model = Model("weights.pt", imgsz=320)
+        model.model.results = [FakeResult()]
+
+        model.predict(np.zeros((4, 4, 3), np.uint8))
+
+        assert model.model.calls[0][1]["imgsz"] == 320
+        assert model.model.calls[0][1]["rect"] is False
+
     def test_a_per_call_confidence_overrides_it(self):
         model = Model("weights.pt", confidence=0.4)
         model.model.results = [FakeResult()]

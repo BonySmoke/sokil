@@ -50,6 +50,7 @@ class ShuttleTracker:
             detector_kwargs["model"],
             confidence=self.config.confidence,
             device=self.config.device,
+            imgsz=detector_kwargs.get("imgsz", 640),
         )
 
     def _new_kalman(self) -> cv2.KalmanFilter:

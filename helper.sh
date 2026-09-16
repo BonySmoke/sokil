@@ -44,7 +44,14 @@ print(entry['asset'])
 "
 }
 
-# Publish trained weights as a GitHub release.
+export_onnx() {
+    local model="$1" weights="$2"
+
+    uv run --quiet --project "$REPO_ROOT" sokil models export-onnx \
+        --model "$model" --weights "$weights" >&2
+}
+
+# Publish trained weights as a GitHub release, with an ONNX export of each.
 #
 # A release asset is named after the file uploaded, and a training run leaves
 # its output as best.pt, so the weights are copied to their published names in a
@@ -75,13 +82,15 @@ models_release() {
 
         asset="$(asset_name "$model")"
         cp "$weights" "$staging/$asset"
-        uploads+=("$staging/$asset")
+        export_onnx "$model" "$staging/$asset"
+        [ -f "$staging/${asset%.*}.onnx" ] || die "ONNX export of $weights failed"
+        uploads+=("$staging/$asset" "$staging/${asset%.*}.onnx")
         pin_args+=("--weights $model=$weights")
     done
 
     gh release create "$tag" \
         --title "Weights $tag" \
-        --notes "Trained weights for the shuttle detector and court segmenter." \
+        --notes "Trained weights for the shuttle detector and court segmenter, as PyTorch (.pt) and ONNX (.onnx)." \
         "${uploads[@]}"
 
     # Publishing alone changes nothing for users: the manifest is what the code
