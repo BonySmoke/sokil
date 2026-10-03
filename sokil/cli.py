@@ -1,10 +1,13 @@
 import logging
+from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.logging import RichHandler
 
 from sokil.court import CourtCameraMode, CourtConfig, CourtModelType
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi"}
 
 app = typer.Typer()
 
@@ -13,6 +16,9 @@ app.add_typer(models_app, name="models")
 
 calibrate_app = typer.Typer(help="Measure the camera lens, once per camera")
 app.add_typer(calibrate_app, name="calibrate")
+
+dataset_app = typer.Typer(help="Work with the annotation dataset")
+app.add_typer(dataset_app, name="dataset")
 
 
 # third-party libraries stay at WARNING so our own output remains readable
@@ -556,11 +562,21 @@ def calibrate_compute(
 def create_cvat_task(
     video_path: Annotated[str, typer.Option(help="The path to the video to annotate")],
     model: Annotated[
-        str, typer.Option(help="Which model the task is for: shuttle or court")
+        str,
+        typer.Option(
+            help="Which model the task is for: shuttle, court or court_keypoints"
+        ),
     ],
     every_n_frames: Annotated[
         int, typer.Option(help="Extract every Nth frame from the video. If 0 ")
     ] = 30,
+    median_frame: Annotated[
+        bool,
+        typer.Option(
+            help="court_keypoints only: annotate the temporal median of the clip "
+            "with the players averaged away leaving just the court"
+        ),
+    ] = True,
     camera_intrinsics_path: Annotated[
         str | None,
         typer.Option(
@@ -587,7 +603,9 @@ def create_cvat_task(
     ] = None,
     verbose: Annotated[bool, typer.Option(help="Enable debug logging")] = False,
 ):
-    """Extract frames from a video and create a CVAT annotation task."""
+    """
+    Extract frames from a video and create a CVAT annotation task.
+    """
     from pathlib import Path
 
     from sokil.training import ModelKind, create_cvat_task
@@ -598,12 +616,419 @@ def create_cvat_task(
         video_path=Path(video_path),
         kind=ModelKind(model),
         every_n_frames=every_n_frames,
+        median_frame=median_frame,
         camera_intrinsics_path=camera_intrinsics_path,
         camera_dist_path=camera_dist_path,
         pre_annotate_model_path=pre_annotate_model_path,
         project_name=project_name,
     )
     typer.echo(f"Created CVAT task {task_id}")
+
+
+@dataset_app.command("init-clips")
+def dataset_init_clips(
+    videos_dir: Annotated[
+        str, typer.Option(help="Folder holding the source recordings")
+    ] = "videos",
+    path: Annotated[
+        str, typer.Option(help="Directory holding the dataset tables")
+    ] = "dataset",
+    clip_id: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Only these clips (repeatable); default is every clip already annotated"
+        ),
+    ] = None,
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """
+    Fill clips.csv from the recordings.
+    """
+    import pandas as pd
+
+    from sokil.dataset import Dataset
+    from sokil.dataset.clips import blank_columns, clip_rows
+    from sokil.dataset.schema import columns
+
+    configure_logging(verbose)
+
+    dataset = Dataset(Path(path))
+
+    def read(table):
+        return dataset.read(table) if dataset.path(table).exists() else None
+
+    events = read("events")
+    court_points = read("court_points")
+    existing = read("clips")
+
+    wanted = set(clip_id or [])
+    if not wanted:
+        for table in (events, court_points, existing):
+            if table is not None:
+                wanted |= set(table["clip_id"])
+
+    if not wanted:
+        raise typer.BadParameter(
+            "Nothing is annotated yet and no --clip-id was given, so there is "
+            "no clip to describe"
+        )
+
+    videos = {}
+    for clip in sorted(wanted):
+        matches = sorted(Path(videos_dir).glob(f"{clip}.*"))
+
+        matches = [m for m in matches if m.suffix.lower() in VIDEO_EXTENSIONS]
+        if not matches:
+            typer.echo(f"No recording for {clip!r} in {videos_dir}", err=True)
+            continue
+
+        videos[clip] = matches[0]
+
+    if not videos:
+        raise typer.Exit(code=1)
+
+    rows = clip_rows(videos, events, court_points, existing)
+    written = dataset.write("clips", pd.DataFrame(rows, columns=columns("clips")))
+    typer.echo(f"Described {len(rows)} clip(s) -> {written}")
+
+    missing = blank_columns(rows)
+    if missing:
+        typer.echo("\nStill to fill in by hand:", err=True)
+        for clip, empty in sorted(missing.items()):
+            typer.echo(f"  {clip}: {', '.join(empty)}", err=True)
+
+
+@dataset_app.command("label-hits")
+def dataset_label_hits(
+    video_path: Annotated[str, typer.Option(help="The clip to label")],
+    path: Annotated[
+        str, typer.Option(help="Directory holding the dataset tables")
+    ] = "dataset",
+    clip_id: Annotated[
+        str | None,
+        typer.Option(
+            help="The clip being labelled; taken from the video filename if omitted"
+        ),
+    ] = None,
+    annotator: Annotated[
+        str | None, typer.Option(help="Who is making the calls; defaults to $USER")
+    ] = None,
+    court_type: Annotated[
+        str | None,
+        typer.Option(help="singles or doubles; taken from clips.csv if omitted"),
+    ] = None,
+    play_fps: Annotated[float, typer.Option(help="Playback rate while playing")] = 30.0,
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """
+    Label where the shuttle landed, and whether it was in/out.
+    The position in metres is derived from court keypoints.
+    """
+    import pandas as pd
+
+    from sokil.dataset import Dataset
+    from sokil.dataset.cvat_import import default_clip_id
+    from sokil.dataset.labeler import (
+        event_rows,
+        label_clip,
+        load_session,
+        merge_events,
+    )
+    from sokil.dataset.landing import image_to_court
+    from sokil.dataset.schema import columns
+
+    configure_logging(verbose)
+
+    video = Path(video_path)
+    if not video.is_file():
+        raise typer.BadParameter(f"No clip at {video}")
+
+    clip = clip_id or default_clip_id(video.name)
+
+    dataset = Dataset(Path(path))
+    events = (
+        dataset.read("events")
+        if dataset.path("events").exists()
+        else pd.DataFrame(columns=columns("events"))
+    )
+    session = load_session(events, clip, annotator)
+
+    court_points = None
+    if dataset.path("court_points").exists():
+        court_points = dataset.read("court_points")
+    else:
+        typer.echo(
+            "No court_points.csv: landings will have no position in metres",
+            err=True,
+        )
+
+    if court_type:
+        session.court_type = court_type
+    elif dataset.path("clips").exists():
+        clips = dataset.read("clips")
+        known = clips[clips["clip_id"] == clip]
+        if not known.empty:
+            session.court_type = known.iloc[0]["court_type"]
+        else:
+            typer.echo(f"{clip!r} is not in clips.csv", err=True)
+
+    def save(current):
+        to_court = (
+            image_to_court(court_points, clip, 0) if court_points is not None else None
+        )
+        merged = merge_events(events, clip, event_rows(current, to_court))
+        written = dataset.write("events", merged)
+        typer.echo(f"Saved {len(current.landings)} landing(s) -> {written}")
+
+    label_clip(video, session, court_points, play_fps=play_fps, on_save=save)
+
+
+@dataset_app.command("tracks")
+def dataset_tracks(
+    path: Annotated[
+        str, typer.Option(help="Directory holding the dataset tables")
+    ] = "dataset",
+    task_id: Annotated[
+        list[int] | None,
+        typer.Option(
+            help="CVAT task id(s) to read (repeatable); default is every completed task"
+        ),
+    ] = None,
+    project_name: Annotated[
+        str, typer.Option(help="CVAT project the shuttle annotations live in")
+    ] = "Badminton Shuttle Detection",
+    clip_id: Annotated[
+        list[str] | None,
+        typer.Option(help="Map a task to a clip id as TASK_ID=CLIP_ID (repeatable)"),
+    ] = None,
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """
+    Rebuild tracks.csv: the ground-truth shuttle box on every annotated frame.
+    """
+    from sokil.dataset import Dataset
+    from sokil.dataset.track_import import import_tracks, merge_tracks
+
+    configure_logging(verbose)
+
+    overrides = {}
+    for mapping in clip_id or []:
+        task, _, clip = mapping.partition("=")
+        if not clip:
+            raise typer.BadParameter(f"{mapping!r} is not TASK_ID=CLIP_ID")
+        overrides[int(task)] = clip
+
+    dataset = Dataset(Path(path))
+    known = (
+        set(dataset.read("clips")["clip_id"])
+        if dataset.path("clips").exists()
+        else None
+    )
+
+    rows = import_tracks(
+        task_ids=task_id or None,
+        project_name=project_name,
+        clip_ids=overrides,
+        known_clips=known,
+    )
+
+    if known is not None:
+        skipped = {row["clip_id"] for row in rows} - known
+        if skipped:
+            typer.echo(
+                f"Skipping {len(skipped)} clip(s) not in clips.csv: "
+                f"{', '.join(sorted(skipped))}",
+                err=True,
+            )
+        rows = [row for row in rows if row["clip_id"] in known]
+
+    if not rows:
+        typer.echo("No shuttle annotations found", err=True)
+        raise typer.Exit(code=1)
+
+    existing = dataset.read("tracks") if dataset.path("tracks").exists() else None
+    merged = merge_tracks(existing, rows)
+
+    written = dataset.write("tracks", merged)
+    typer.echo(
+        f"Wrote {len(rows)} row(s) for {len({r['clip_id'] for r in rows})} clip(s); "
+        f"{len(merged)} rows for {merged['clip_id'].nunique()} clip(s) total "
+        f"-> {written}"
+    )
+
+
+@dataset_app.command("court-points")
+def dataset_court_points(
+    path: Annotated[
+        str, typer.Option(help="Directory holding the dataset tables")
+    ] = "dataset",
+    task_id: Annotated[
+        list[int] | None,
+        typer.Option(
+            help="CVAT task id(s) to read (repeatable). "
+            "If omitted, every task in the project is read"
+        ),
+    ] = None,
+    project_name: Annotated[
+        str, typer.Option(help="CVAT project the keypoint tasks live in")
+    ] = "Badminton Court Keypoints",
+    clip_id: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Map a task to a clip id as TASK_ID=CLIP_ID (repeatable). "
+            "Needed when the recording was renamed after it was uploaded"
+        ),
+    ] = None,
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """
+    Rebuild court_points.csv from the CVAT keypoint annotations.
+    """
+    from sokil.dataset import Dataset
+    from sokil.dataset.cvat_import import import_court_points, merge_court_points
+
+    configure_logging(verbose)
+
+    overrides = {}
+    for mapping in clip_id or []:
+        task, _, clip = mapping.partition("=")
+        if not clip:
+            raise typer.BadParameter(f"{mapping!r} is not TASK_ID=CLIP_ID")
+        overrides[int(task)] = clip
+
+    dataset = Dataset(Path(path))
+    known = (
+        set(dataset.read("clips")["clip_id"])
+        if dataset.path("clips").exists()
+        else None
+    )
+
+    rows = import_court_points(
+        task_ids=task_id or None,
+        project_name=project_name,
+        clip_ids=overrides,
+        known_clips=known,
+    )
+    if not rows:
+        typer.echo("No court keypoints found", err=True)
+        raise typer.Exit(code=1)
+
+    # clips.csv is the dataset's manifest, so a task annotating something that
+    # is not in it is not part of the dataset — an old task, or one belonging
+    # to another project's work. Before the manifest exists there is nothing to
+    # filter against and everything is taken.
+    if known is not None:
+        skipped = {row["clip_id"] for row in rows} - known
+        if skipped:
+            typer.echo(
+                f"Skipping {len(skipped)} clip(s) not in clips.csv: "
+                f"{', '.join(sorted(skipped))}",
+                err=True,
+            )
+        rows = [row for row in rows if row["clip_id"] in known]
+
+        if not rows:
+            typer.echo("Nothing left to import", err=True)
+            raise typer.Exit(code=1)
+
+    existing = (
+        dataset.read("court_points") if dataset.path("court_points").exists() else None
+    )
+    merged = merge_court_points(existing, rows)
+
+    written = dataset.write("court_points", merged)
+    typer.echo(
+        f"Wrote {len(rows)} row(s) for {len({r['clip_id'] for r in rows})} clip(s); "
+        f"{len(merged)} rows for {merged['clip_id'].nunique()} clip(s) total "
+        f"-> {written}"
+    )
+
+
+@dataset_app.command("split")
+def dataset_split(
+    path: Annotated[
+        str, typer.Option(help="Directory holding the dataset tables")
+    ] = "dataset",
+    project_name: Annotated[
+        str,
+        typer.Option(
+            help="CVAT project whose task subsets state each clip's partition"
+        ),
+    ] = "Badminton Court Keypoints",
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """
+    Rebuild dataset/splits/ from the CVAT task subsets for hit detection.
+    Model YOLO training datasets are generated by export_cvat_dataset.
+    """
+    from sokil.dataset import Dataset
+    from sokil.dataset.cvat_import import read_subsets
+    from sokil.dataset.splits import SplitError, mode_coverage, split_from_subsets
+
+    configure_logging(verbose)
+
+    dataset = Dataset(Path(path))
+    clips = dataset.read("clips")
+    known = set(clips["clip_id"])
+
+    subsets = read_subsets(project_name, known_clips=known)
+    missing = sorted(known - set(subsets))
+    if missing:
+        typer.echo(
+            f"{len(missing)} clip(s) in clips.csv have no task in "
+            f"{project_name!r}: {', '.join(missing)}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        splits = split_from_subsets({c: subsets[c] for c in sorted(known)})
+    except SplitError as error:
+        typer.echo(str(error), err=True)
+        typer.echo(
+            "\nSet each task's Subset in CVAT (Train / Validation / Test), "
+            "then run this again.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    dataset.write_splits(splits)
+    for name, clip_ids in splits.items():
+        typer.echo(f"{name}: {len(clip_ids)} clip(s)")
+        for clip_id in clip_ids:
+            typer.echo(f"  {clip_id}")
+
+    camera_modes = dict(zip(clips["clip_id"], clips["camera_mode"]))
+    for warning in mode_coverage(splits, camera_modes):
+        typer.echo(f"\nwarning: {warning}", err=True)
+
+
+@dataset_app.command("validate")
+def dataset_validate(
+    path: Annotated[str, typer.Option(help="Directory holding dataset")] = "dataset",
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """
+    Check the annotation dataset inconsistencies.
+    """
+    from sokil.dataset import Dataset, DatasetError
+
+    configure_logging(verbose)
+
+    try:
+        problems = Dataset(Path(path)).validate()
+    except DatasetError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from None
+
+    for problem in problems:
+        typer.echo(problem, err=True)
+
+    if problems:
+        typer.echo(f"\n{len(problems)} problem(s) found", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"{path}: no problems found")
 
 
 @app.command()
@@ -637,6 +1062,12 @@ def export_cvat_dataset(
         ),
     ] = False,
     seed: Annotated[int, typer.Option(help="Random seed for the dataset split")] = 1,
+    seed_split: Annotated[
+        bool,
+        typer.Option(
+            help="Shuffle clips by seed instead of using each CVAT task's Subset"
+        ),
+    ] = False,
     min_frame_gap: Annotated[
         int,
         typer.Option(
@@ -676,6 +1107,7 @@ def export_cvat_dataset(
         min_frame_gap=min_frame_gap,
         valid_size=valid_size,
         test_size=test_size,
+        seed_split=seed_split,
     )
     typer.echo(f"Dataset ready: {data_yaml}")
 

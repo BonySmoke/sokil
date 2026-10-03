@@ -26,6 +26,7 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 class ModelKind(str, Enum):
     SHUTTLE = "shuttle"
     COURT = "court"
+    COURT_KEYPOINTS = "court_keypoints"
 
 
 # Shipped with the package: these are the defaults the code was written
