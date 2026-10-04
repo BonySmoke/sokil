@@ -35,23 +35,37 @@ class TrackerConfig:
 
 class ShuttleTracker:
     """
-    Detects the shuttle on every frame and measures its motion.
-
-    One decode pass produces one ShuttleTrack per frame the shuttle was found
-    on: the bounding box, a Kalman-smoothed speed, an EMA-smoothed velocity
-    direction, the turn angle against the previous two detections, and the
-    bbox blur (measured here because it is the only motion feature that needs
-    the pixels, which no later stage keeps).
+    Detects the shuttle and measures its motion.
     """
 
-    def __init__(self, detector_kwargs: dict, config: TrackerConfig | None = None):
+    def __init__(
+        self,
+        detector_kwargs: dict | None = None,
+        config: TrackerConfig | None = None,
+        detector: ShuttleDetector | None = None,
+    ):
+        """
+        :param detector_kwargs: the weights to detect with, when no detector is
+            given.
+        :param detector: anything answering best_box(image, frame=...). The
+            trained detector by default; a ground-truth source (see
+            sokil.dataset.boxes.ShuttleBoxSource) puts annotated boxes through
+            the same pass, so what the tracker derives can be measured without
+            a model in it.
+        """
         self.config = config or TrackerConfig()
-        self.detector = ShuttleDetector(
-            detector_kwargs["model"],
-            confidence=self.config.confidence,
-            device=self.config.device,
-            imgsz=detector_kwargs.get("imgsz", 640),
-        )
+
+        if detector is None:
+            if detector_kwargs is None:
+                raise ValueError("Give either detector_kwargs or a detector")
+            detector = ShuttleDetector(
+                detector_kwargs["model"],
+                confidence=self.config.confidence,
+                device=self.config.device,
+                imgsz=detector_kwargs.get("imgsz", 640),
+            )
+
+        self.detector = detector
 
     def _new_kalman(self) -> cv2.KalmanFilter:
         # 4 dynamic params (x, y, dx, dy), 2 measured (x, y)
@@ -101,7 +115,12 @@ class ShuttleTracker:
                 previous_frames = list(recent_frames)
                 recent_frames.append(gray)
 
-                detection = self.detector.best_box(decoded.model_input)
+                # The frame number travels with the image: a detector ignores
+                # it, while a source that already knows where the shuttle is
+                # needs it to look the frame up rather than predict on it.
+                detection = self.detector.best_box(
+                    decoded.model_input, frame=decoded.number
+                )
 
                 # the shuttle has not been found
                 if detection is None:
