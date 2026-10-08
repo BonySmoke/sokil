@@ -244,7 +244,8 @@ def _court_point_problems(clips: pd.DataFrame, court_points: pd.DataFrame) -> li
 
     The reprojection check is the one worth having. Everything else catches
     typing; that one catches a confident click on the wrong intersection, which
-    is the mistake a human reviewer will not see and a benchmark will inherit.
+    is the mistake a human reviewer will not see and the evaluation will
+    inherit.
     """
     import numpy as np
 

@@ -7,7 +7,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from .court import fit_homography
+from .court import image_to_court_homography
 from .schema import Line
 
 logger = logging.getLogger(__name__)
@@ -48,21 +48,19 @@ def image_to_court(court_points: pd.DataFrame, clip_id: str, frame: int):
         return None
 
     visible = keyframe[keyframe["visible"]]
-    matrix = fit_homography(
+    # The same fit the evaluation places its court with. Fitting one direction
+    # and inverting the other gives answers that differ by centimetres — which
+    # is the unit the landings are measured in, so the two would disagree about
+    # the very thing they are there to measure.
+    matrix = image_to_court_homography(
         list(visible["vertex"]), visible[["x_px", "y_px"]].to_numpy()
     )
     if matrix is None:
         logger.warning("Court keypoints for clip %r do not place a court", clip_id)
         return None
 
-    try:
-        inverse = np.linalg.inv(matrix)
-    except np.linalg.LinAlgError:
-        logger.warning("Court for clip %r cannot be inverted", clip_id)
-        return None
-
     def to_court(x_px: float, y_px: float) -> tuple[float, float] | None:
-        projected = inverse @ np.array([x_px, y_px, 1.0])
+        projected = matrix @ np.array([x_px, y_px, 1.0])
         if np.isclose(projected[2], 0):
             return None
         x_cm, y_cm = projected[:2] / projected[2]

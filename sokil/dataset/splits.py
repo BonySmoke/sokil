@@ -1,5 +1,5 @@
 """
-The benchmark split: which clips the hit detection may be tuned on.
+The evaluation split: which clips the hit detection may be tuned on.
 """
 
 import logging

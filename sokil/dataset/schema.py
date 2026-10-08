@@ -111,7 +111,7 @@ EVENTS = pa.DataFrameSchema(
         "line": _enum_column(Line, nullable=True),
         # Where the annotator clicked, in image pixels, and the same point in
         # court metres through the clip's court keypoints. Pixels are the
-        # observation and metres are derived, which lets a benchmark report an
+        # observation and metres are derived, which lets the evaluation report an
         # error in centimetres instead of a bare right or wrong.
         "x_px": _pixel_column(),
         "y_px": _pixel_column(),

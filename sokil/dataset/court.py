@@ -108,3 +108,51 @@ def reprojection_residuals(
 
     projected = projected[:, :2] / w[:, None]
     return np.linalg.norm(projected - np.asarray(points, dtype=np.float64), axis=1)
+
+
+# TODO: check if this should be a part of of the Court class, not a dataset function
+def image_to_court_homography(vertices: list[int], points: np.ndarray):
+    """
+    The image->court homography these annotated vertices imply, or None.
+
+    The other direction from fit_homography, and the one the pipeline wants:
+    ViewTransformer holds image->court, so Court.from_homography expects that
+    way round. Fitted directly rather than inverted, so a near-singular fit
+    fails here instead of producing a matrix that inverts badly.
+    """
+    import cv2
+
+    if len(vertices) < MIN_POINTS_FOR_HOMOGRAPHY:
+        return None
+
+    source = np.asarray(points, dtype=np.float32)
+    target = court_coordinates(vertices).astype(np.float32)
+
+    matrix, _ = cv2.findHomography(source, target, 0)
+    return matrix
+
+
+# TODO: check if this should be a part of of the Court class, not a dataset function
+def court_from_points(court_points, clip_id: str, frame: int = 0, court_config=None):
+    """
+    A Court placed by the annotated keypoints rather than solved from the video.
+
+    This is the court the evaluation adjudicates against when it is measuring
+    the algorithm rather than the solver: the geometry is a human's, so an
+    error in the verdict is the algorithm's own.
+    """
+    from ..court import Court
+    from .landing import court_keyframe
+
+    keyframe = court_keyframe(court_points, clip_id, frame)
+    if keyframe is None:
+        raise ValueError(f"No court keypoints for clip {clip_id!r}")
+
+    visible = keyframe[keyframe["visible"]]
+    matrix = image_to_court_homography(
+        list(visible["vertex"]), visible[["x_px", "y_px"]].to_numpy()
+    )
+    if matrix is None:
+        raise ValueError(f"Court keypoints for clip {clip_id!r} place no court")
+
+    return Court.from_homography(matrix, court_config=court_config)

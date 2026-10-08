@@ -1032,6 +1032,180 @@ def dataset_validate(
 
 
 @app.command()
+def evaluate(
+    path: Annotated[
+        str, typer.Option(help="Directory holding the dataset tables")
+    ] = "dataset",
+    videos_dir: Annotated[
+        str, typer.Option(help="Folder holding the source recordings")
+    ] = "videos",
+    split: Annotated[
+        str,
+        typer.Option(
+            help="Which clips to measure: all, train, valid or test. Tuning "
+            "belongs on train; a figure you intend to publish belongs on test"
+        ),
+    ] = "all",
+    results_dir: Annotated[
+        str, typer.Option(help="Where the JSON record is written")
+    ] = "evaluations",
+    verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
+):
+    """
+    Measure whether the hit detection is right, with ground truth in place of
+    both models.
+
+    The boxes are the annotator's and so is the court, so whatever the hit
+    detection gets wrong is its own: the figure moves when a threshold moves
+    and not when a model is retrained. That is what makes it the one to tune
+    against.
+
+    Every run writes a JSON record carrying the commit, the thresholds, the
+    machine and the clips, because a metric without those cannot be compared
+    with a later one. How fast the pipeline runs is a separate measurement —
+    benchmarking — and belongs in the same record, not under this name.
+    """
+
+    from sokil.dataset import Dataset
+    from sokil.evaluation import report
+    from sokil.evaluation.run import run_algorithm, summarise
+    from sokil.hits import HitDetectionConfig
+
+    configure_logging(verbose)
+
+    dataset = Dataset(Path(path))
+    clips = dataset.read("clips").set_index("clip_id")
+    events = dataset.read("events")
+    court_points = dataset.read("court_points")
+    tracks = dataset.read("tracks")
+
+    wanted = sorted(set(events["clip_id"]) & set(tracks["clip_id"]))
+    if split != "all":
+        splits = dataset.read_splits()
+        if split not in splits:
+            raise typer.BadParameter(f"{split!r} is not a split")
+        if not splits[split]:
+            typer.echo(
+                f"The {split} split is empty — run 'sokil dataset split' first",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        wanted = [clip for clip in wanted if clip in set(splits[split])]
+
+    if not wanted:
+        typer.echo("No clip has both landings and a ground-truth track", err=True)
+        raise typer.Exit(code=1)
+
+    hit_config = HitDetectionConfig()
+    results = []
+
+    for clip_id in wanted:
+        video = Path(videos_dir) / f"{clip_id}.mp4"
+        if not video.is_file():
+            typer.echo(f"No recording for {clip_id!r} in {videos_dir}", err=True)
+            continue
+
+        results.append(
+            run_algorithm(
+                clip_id,
+                video,
+                clips.loc[clip_id],
+                events,
+                court_points,
+                tracks,
+                hit_config=hit_config,
+            )
+        )
+
+    if not results:
+        raise typer.Exit(code=1)
+
+    totals = summarise(results)
+    _echo_evaluation_table(results, totals)
+
+    written = report.write(
+        report.record(results, hit_config, Path(path), wanted, totals),
+        Path(results_dir),
+    )
+    typer.echo(f"\nrecord: {written}")
+
+
+def _echo_evaluation_table(results, totals):
+    """The per-clip figures, and the pooled ones beneath them."""
+    from sokil.evaluation.metrics import MATCH_WINDOW_FRAMES
+
+    header = (
+        f"{'clip':<26}{'landings':>9}{'matched':>9}{'missed':>8}{'spurious':>10}"
+        f"{'precision':>11}{'recall':>9}{'position':>10}{'verdict':>9}"
+    )
+    typer.echo("\n" + header)
+    typer.echo("-" * len(header))
+
+    for result in results:
+        detection = result.detection
+        typer.echo(
+            f"{_short_clip(result.clip_id):<26}"
+            f"{detection['labelled']:>9}{detection['matched']:>9}"
+            f"{detection['missed']:>8}{detection['spurious']:>10}"
+            f"{_percentage(detection['precision']):>11}"
+            f"{_percentage(detection['recall']):>9}"
+            f"{_centimetres(result.position['median_cm']):>10}"
+            f"{_percentage(result.verdict['accuracy']):>9}"
+        )
+
+    detection = totals["detection"]
+    typer.echo("-" * len(header))
+    typer.echo(
+        f"{'pooled':<26}"
+        f"{detection['labelled']:>9}{detection['matched']:>9}"
+        f"{detection['missed']:>8}{detection['spurious']:>10}"
+        f"{_percentage(detection['precision']):>11}"
+        f"{_percentage(detection['recall']):>9}"
+        f"{_centimetres(totals['position']['median_cm']):>10}"
+        f"{_percentage(totals['verdict']['accuracy']):>9}"
+    )
+
+    typer.echo(
+        "\nlandings: labelled in the dataset.  matched: found within "
+        f"{MATCH_WINDOW_FRAMES} frames of a labelled landing."
+        "\nmissed: labelled but not found.  spurious: found but accounting "
+        "for no labelled landing."
+        "\nposition: median distance from the labelled landing, over the "
+        "matched ones.  verdict: of those, how many calls were right."
+    )
+
+    verdict = totals["verdict"]
+    if verdict["called_in_was_out"] or verdict["called_out_was_in"]:
+        typer.echo(
+            f"\nwrong calls: {verdict['called_in_was_out']} called in when out, "
+            f"{verdict['called_out_was_in']} called out when in"
+        )
+
+
+def _short_clip(clip_id: str, width: int = 25) -> str:
+    """
+    A clip id short enough for a table, keeping the part that identifies it.
+
+    The tail is the cutting tool's doing — "-merged-cut-merged-1784750377220" —
+    and is the same shape on every clip, so truncating from the right leaves
+    every row looking alike.
+    """
+    import re
+
+    trimmed = re.sub(r"(-merged)*-cut-merged-\d+$", "", clip_id)
+    trimmed = trimmed.removeprefix("volan_leva_")
+    return trimmed[:width]
+
+
+def _percentage(value) -> str:
+    return "-" if value is None else f"{100 * value:.1f}%"
+
+
+def _centimetres(value) -> str:
+    return "-" if value is None else f"{value:.1f}cm"
+
+
+@app.command()
 def export_cvat_dataset(
     model: Annotated[
         str, typer.Option(help="Which model the dataset is for: shuttle or court")
