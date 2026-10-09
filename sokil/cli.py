@@ -1039,6 +1039,14 @@ def evaluate(
     videos_dir: Annotated[
         str, typer.Option(help="Folder holding the source recordings")
     ] = "videos",
+    configuration: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Which configuration(s) to measure (repeatable): "
+            "'algorithm' substitutes ground truth for both models, 'detector' "
+            "only for the court, 'system' for neither. Default: algorithm"
+        ),
+    ] = None,
     split: Annotated[
         str,
         typer.Option(
@@ -1046,32 +1054,58 @@ def evaluate(
             "belongs on train; a figure you intend to publish belongs on test"
         ),
     ] = "all",
+    shuttle_detector_model_path: Annotated[
+        str | None,
+        typer.Option(help="Shuttle weights, for the detector and system runs"),
+    ] = None,
+    court_segmentation_model_path: Annotated[
+        str | None,
+        typer.Option(help="Court weights, for the system run only"),
+    ] = None,
     results_dir: Annotated[
         str, typer.Option(help="Where the JSON record is written")
     ] = "evaluations",
     verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
 ):
     """
-    Measure whether the hit detection is right, with ground truth in place of
-    both models.
+    Measure whether the hit detection is right, against the dataset.
 
-    The boxes are the annotator's and so is the court, so whatever the hit
-    detection gets wrong is its own: the figure moves when a threshold moves
-    and not when a model is retrained. That is what makes it the one to tune
-    against.
+    Three configurations over one ground truth, so a change can be credited to
+    whatever caused it:
 
-    Every run writes a JSON record carrying the commit, the thresholds, the
-    machine and the clips, because a metric without those cannot be compared
-    with a later one. How fast the pipeline runs is a separate measurement —
-    benchmarking — and belongs in the same record, not under this name.
+    \b
+      algorithm  annotated boxes, annotated court — the logic alone
+      detector   model boxes, annotated court     — plus the shuttle detector
+      system     model boxes, solved court        — as it ships
+
+    The algorithm configuration is the one to tune against: HitDetectionConfig
+    carries seven hand-set thresholds meant to be swept, and a figure that also
+    moves when a model is retrained cannot tell you whether a sweep helped.
+
+    Every run writes a JSON record carrying the commit, the thresholds, a
+    digest of each dataset table and the versions that could change a figure.
+    How fast the pipeline runs is a separate measurement — benchmarking — and
+    belongs in the same record, not under this name.
     """
-
     from sokil.dataset import Dataset
     from sokil.evaluation import report
-    from sokil.evaluation.run import run_algorithm, summarise
+    from sokil.evaluation.run import (
+        CONFIGURATIONS,
+        run_algorithm,
+        run_detector,
+        run_system,
+        summarise,
+    )
     from sokil.hits import HitDetectionConfig
 
     configure_logging(verbose)
+
+    wanted_configurations = configuration or ["algorithm"]
+    unknown = [name for name in wanted_configurations if name not in CONFIGURATIONS]
+    if unknown:
+        raise typer.BadParameter(
+            f"{unknown} is not a configuration; expected {sorted(CONFIGURATIONS)}"
+        )
 
     dataset = Dataset(Path(path))
     clips = dataset.read("clips").set_index("clip_id")
@@ -1079,7 +1113,78 @@ def evaluate(
     court_points = dataset.read("court_points")
     tracks = dataset.read("tracks")
 
+    wanted_clips = _clips_to_evaluate(dataset, events, tracks, split)
+    hit_config = HitDetectionConfig()
+
+    # The models declare the frames they were trained on, so that is what they
+    # are fed — the same reasoning as the review command.
+    needs_models = {"detector", "system"} & set(wanted_configurations)
+    grayscale, shuttle_kwargs, court_kwargs = True, None, None
+    if needs_models:
+        grayscale, shuttle_kwargs, court_kwargs = _evaluation_models(
+            shuttle_detector_model_path,
+            court_segmentation_model_path,
+            need_court="system" in wanted_configurations,
+        )
+
+    results = []
+    for name in wanted_configurations:
+        typer.echo(f"\n{name}: {CONFIGURATIONS[name]}")
+
+        for clip_id in wanted_clips:
+            video = Path(videos_dir) / f"{clip_id}.mp4"
+            if not video.is_file():
+                typer.echo(f"No recording for {clip_id!r} in {videos_dir}", err=True)
+                continue
+
+            common = {
+                "clip": clips.loc[clip_id],
+                "events": events,
+                "court_points": court_points,
+                "hit_config": hit_config,
+                "grayscale": grayscale,
+            }
+
+            if name == "algorithm":
+                result = run_algorithm(clip_id, video, tracks=tracks, **common)
+            elif name == "detector":
+                result = run_detector(
+                    clip_id, video, shuttle_detector_kwargs=shuttle_kwargs, **common
+                )
+            else:
+                result = run_system(
+                    clip_id,
+                    video,
+                    shuttle_detector_kwargs=shuttle_kwargs,
+                    court_detector_kwargs=court_kwargs,
+                    **common,
+                )
+
+            results.append(result)
+
+        _echo_evaluation_table(
+            [r for r in results if r.configuration == name],
+            summarise([r for r in results if r.configuration == name]),
+        )
+
+    if not results:
+        raise typer.Exit(code=1)
+
+    totals = {
+        name: summarise([r for r in results if r.configuration == name])
+        for name in wanted_configurations
+    }
+    written = report.write(
+        report.record(results, hit_config, Path(path), wanted_clips, totals),
+        Path(results_dir),
+    )
+    typer.echo(f"\nrecord: {written}")
+
+
+def _clips_to_evaluate(dataset, events, tracks, split: str) -> list[str]:
+    """The clips a configuration can be measured on, honouring the split."""
     wanted = sorted(set(events["clip_id"]) & set(tracks["clip_id"]))
+
     if split != "all":
         splits = dataset.read_splits()
         if split not in splits:
@@ -1096,38 +1201,40 @@ def evaluate(
         typer.echo("No clip has both landings and a ground-truth track", err=True)
         raise typer.Exit(code=1)
 
-    hit_config = HitDetectionConfig()
-    results = []
+    return wanted
 
-    for clip_id in wanted:
-        video = Path(videos_dir) / f"{clip_id}.mp4"
-        if not video.is_file():
-            typer.echo(f"No recording for {clip_id!r} in {videos_dir}", err=True)
-            continue
 
-        results.append(
-            run_algorithm(
-                clip_id,
-                video,
-                clips.loc[clip_id],
-                events,
-                court_points,
-                tracks,
-                hit_config=hit_config,
-            )
-        )
+def _evaluation_models(
+    shuttle_path: str | None, court_path: str | None, need_court: bool
+):
+    """
+    The weights the model-backed configurations run, and what they expect.
 
-    if not results:
-        raise typer.Exit(code=1)
+    Taken from the published manifest rather than assumed: the weights declare
+    the frames they were trained on, and feeding them anything else measures
+    the mismatch instead of the model.
+    """
+    from sokil.models import Segmenter
+    from sokil.settings import ModelName, ensure_model_path, model_spec
 
-    totals = summarise(results)
-    _echo_evaluation_table(results, totals)
+    shuttle_expects = model_spec(ModelName.SHUTTLE).expects
+    shuttle_kwargs = {
+        "model": shuttle_path or str(ensure_model_path(ModelName.SHUTTLE)),
+        "imgsz": shuttle_expects.get("imgsz", 640),
+    }
 
-    written = report.write(
-        report.record(results, hit_config, Path(path), wanted, totals),
-        Path(results_dir),
-    )
-    typer.echo(f"\nrecord: {written}")
+    court_kwargs = None
+    if need_court:
+        court_expects = model_spec(ModelName.COURT).expects
+        court_kwargs = {
+            "segmentation_model": Segmenter(
+                court_path or str(ensure_model_path(ModelName.COURT)),
+                imgsz=court_expects.get("imgsz", 640),
+            ),
+            "keypoint_model": None,
+        }
+
+    return shuttle_expects.get("grayscale", True), shuttle_kwargs, court_kwargs
 
 
 def _echo_evaluation_table(results, totals):
@@ -1137,6 +1244,7 @@ def _echo_evaluation_table(results, totals):
     header = (
         f"{'clip':<26}{'landings':>9}{'matched':>9}{'missed':>8}{'spurious':>10}"
         f"{'precision':>11}{'recall':>9}{'position':>10}{'verdict':>9}"
+        f"{'court':>9}"
     )
     typer.echo("\n" + header)
     typer.echo("-" * len(header))
@@ -1151,6 +1259,7 @@ def _echo_evaluation_table(results, totals):
             f"{_percentage(detection['recall']):>9}"
             f"{_centimetres(result.position['median_cm']):>10}"
             f"{_percentage(result.verdict['accuracy']):>9}"
+            f"{_court_offset(result):>9}"
         )
 
     detection = totals["detection"]
@@ -1163,6 +1272,7 @@ def _echo_evaluation_table(results, totals):
         f"{_percentage(detection['recall']):>9}"
         f"{_centimetres(totals['position']['median_cm']):>10}"
         f"{_percentage(totals['verdict']['accuracy']):>9}"
+        f"{'':>9}"
     )
 
     typer.echo(
@@ -1172,6 +1282,10 @@ def _echo_evaluation_table(results, totals):
         "for no labelled landing."
         "\nposition: median distance from the labelled landing, over the "
         "matched ones.  verdict: of those, how many calls were right."
+        "\ncourt: how far the court this run used sits from the annotated "
+        "one, which is nothing unless it was solved.  'failed': no court was "
+        "solved, so nothing below it could be judged.  'FLIPPED': solved the "
+        "right shape end-for-end, so verdicts survive but coordinates mirror."
     )
 
     verdict = totals["verdict"]
@@ -1180,6 +1294,26 @@ def _echo_evaluation_table(results, totals):
             f"\nwrong calls: {verdict['called_in_was_out']} called in when out, "
             f"{verdict['called_out_was_in']} called out when in"
         )
+
+
+def _court_offset(result) -> str:
+    """
+    How far this run's court sits from the annotated one.
+
+    Blank where the court was given rather than solved: zero by construction
+    says nothing, and printing it would invite reading it as a measurement.
+    """
+    if not result.court_solved:
+        return "failed"
+
+    if result.court.get("flipped_end_for_end"):
+        return "FLIPPED"
+
+    solved = result.court.get("solved_cm")
+    if solved is None or solved["median"] < 1.0:
+        return ""
+
+    return f"{solved['median']:.0f}cm"
 
 
 def _short_clip(clip_id: str, width: int = 25) -> str:

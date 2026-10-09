@@ -30,6 +30,10 @@ from .util import (
 
 logger = logging.getLogger(__name__)
 
+# How far apart, in image pixels, the two baselines must sit before which of
+# them faces the camera can be read off the frame at all.
+MIN_END_SEPARATION_PX = 5.0
+
 
 class CourtCameraMode(Enum):
     FULL = "full"
@@ -330,7 +334,7 @@ class Court:
         # try every order-preserving assignment and keep the one whose
         # homography best matches the segmentation mask.
         best_transformer = None
-        best_iou = -1.0
+        best_key = (-1, -1.0)
         for matches in candidates:
             source_pts, target_pts = correspondences_from_matches(matches)
             if len(source_pts) < 4:
@@ -342,13 +346,55 @@ class Court:
                 continue
 
             scored = self._transformer_score(transformer, source_pts, target_pts)
-            if scored is not None and scored[1] > best_iou:
-                best_transformer, best_iou = transformer, scored[1]
+            if scored is None:
+                continue
+
+            key = (int(self._origin_nearest_to_the_camera(transformer)), scored[1])
+            if key > best_key:
+                best_transformer, best_key = transformer, key
 
         if best_transformer is not None:
-            self.homography_iou = best_iou
+            self.homography_iou = best_key[1]
+            if not self._origin_nearest_to_the_camera(best_transformer):
+                logger.warning(
+                    "Every candidate court places the far baseline nearest the "
+                    "camera; reported positions will be mirrored along the "
+                    "court's length"
+                )
 
         return best_transformer
+
+    def _origin_nearest_to_the_camera(self, transformer: "ViewTransformer") -> bool:
+        """
+        Whether the court baseline is nearest to the camera.
+
+        True when the two ends cannot be told apart — a camera level with the
+        court, or looking down its length, flattens the difference — because an
+        undecidable court should be left where the mask put it rather than
+        turned round on noise.
+        """
+        model = self.court_model
+        ends = np.array(
+            [[model.width / 2, 0.0], [model.width / 2, model.length]],
+            dtype=np.float32,
+        )
+
+        try:
+            projected = transformer.inverse_transform_points(ends)
+        except cv2.error:
+            return True
+
+        if projected is None or len(projected) != 2 or not np.isfinite(projected).all():
+            return True
+
+        near_end_y, far_end_y = float(projected[0][1]), float(projected[1][1])
+
+        # Below this the two ends are the same height on screen and the test
+        # says nothing; the figure is in pixels of a frame hundreds tall.
+        if abs(near_end_y - far_end_y) < MIN_END_SEPARATION_PX:
+            return True
+
+        return near_end_y > far_end_y
 
     def solve_geometric_homography(self) -> bool:
         """
