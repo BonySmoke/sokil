@@ -88,7 +88,6 @@ CLIPS = pa.DataFrameSchema(
         # that fails it is out of scope until that changes.
         "camera_static": pa.Column(bool),
         "faces_blurred": pa.Column(bool),
-        "license": pa.Column(str),
         "notes": pa.Column(str, nullable=True),
     },
     strict=True,
