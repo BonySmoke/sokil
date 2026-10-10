@@ -189,6 +189,7 @@ def observed_camera_mode(court_points: pd.DataFrame, clip_id: str) -> str | None
 
 
 # TODO: turn rows into data classes
+# Also check if validation can be done at the data class level
 def clip_rows(
     videos: dict[str, Path],
     events: pd.DataFrame | None = None,
@@ -225,12 +226,6 @@ def clip_rows(
 
         if is_empty(row.get("camera_mode")) and court_points is not None:
             row["camera_mode"] = observed_camera_mode(court_points, clip_id)
-
-        if is_empty(row.get("faces_blurred")):
-            # Nothing has been blurred until somebody blurs it, and a dataset
-            # that claims otherwise is the one mistake here that cannot be
-            # taken back once it is published.
-            row["faces_blurred"] = False
 
         rows.append(row)
 

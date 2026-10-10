@@ -61,11 +61,6 @@ def _pixel_column(nullable: bool = True, **kwargs) -> pa.Column:
 CLIPS = pa.DataFrameSchema(
     {
         "clip_id": _pattern_column(CLIP_ID_PATTERN, unique=True),
-        # The recording this clip's frames were decoded from, kept as a digest
-        # plus a location rather than as a copy. The digest is identity: it is
-        # what proves a clip came from the footage it names, and it stays valid
-        # whether the release ships the video, links it, or withholds it.
-        "source_sha256": _pattern_column(SHA256_PATTERN),
         "source_uri": _pattern_column(SOURCE_URI_PATTERN, nullable=True),
         # Extracted frames, in cv2 decode order. Bounds every frame index, so a
         # landing labelled past the end of its clip is caught as the mistake it
@@ -87,7 +82,6 @@ CLIPS = pa.DataFrameSchema(
         # than approximately, and the pipeline solves the court once, so a clip
         # that fails it is out of scope until that changes.
         "camera_static": pa.Column(bool),
-        "faces_blurred": pa.Column(bool),
         "notes": pa.Column(str, nullable=True),
     },
     strict=True,
