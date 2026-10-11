@@ -712,21 +712,11 @@ def dataset_refresh(
             typer.echo(f"  {clip}: {', '.join(empty)}", err=True)
 
 
-# TODO: I don't think it should reside in the cli.py since this is not a command
 def _report_undescribed(videos_dir: Path, wanted: set[str]) -> None:
-    """
-    Name the recordings sitting in the folder that the dataset knows nothing
-    about.
+    """Say which recordings the dataset knows nothing about."""
+    from sokil.dataset.clips import undescribed_recordings
 
-    They are not described because nothing is annotated on them, which is
-    correct — but saying nothing about a file the user can see reads as the
-    command having missed it.
-    """
-    undescribed = sorted(
-        path.stem
-        for path in videos_dir.iterdir()
-        if path.suffix.lower() in VIDEO_EXTENSIONS and path.stem not in wanted
-    )
+    undescribed = undescribed_recordings(videos_dir, wanted, VIDEO_EXTENSIONS)
     if not undescribed:
         return
 
@@ -1132,6 +1122,7 @@ def evaluate(
     from sokil.evaluation import report
     from sokil.evaluation.run import (
         CONFIGURATIONS,
+        models_for,
         run_automatic,
         run_manual,
         run_shuttle_detector,
@@ -1162,7 +1153,7 @@ def evaluate(
     needs_models = {"shuttle-detector", "automatic"} & set(wanted_configurations)
     grayscale, shuttle_kwargs, court_kwargs = True, None, None
     if needs_models:
-        grayscale, shuttle_kwargs, court_kwargs = _evaluation_models(
+        grayscale, shuttle_kwargs, court_kwargs = models_for(
             shuttle_detector_model_path,
             court_segmentation_model_path,
             need_court="automatic" in wanted_configurations,
@@ -1222,99 +1213,44 @@ def evaluate(
     typer.echo(f"\nrecord: {written}")
 
 
-# TODO: probably shouldn't be in cli.py since it's not a command
-# Check functions under it as well
 def _only_dataset_clips(rows: list[dict], known, named_tasks: bool) -> list[dict]:
-    """
-    Drop rows for clips the dataset does not know about.
+    """Report what the dataset filter decided, and stop if nothing survives."""
+    from sokil.dataset.cvat_import import for_dataset_clips
 
-    clips.csv is the register of what belongs, so sweeping a whole project
-    would otherwise pull in old tasks and other people's work. A task named on
-    the command line is exempt: naming it is the instruction, and a clip has to
-    get into the tables somehow before init-clips can describe it — filtering
-    it out here would make the first import of a new clip impossible.
-    """
-    if known is None or named_tasks:
-        new = {row["clip_id"] for row in rows} - (known or set())
-        if new:
-            typer.echo(
-                f"{len(new)} clip(s) are not in clips.csv yet; run "
-                f"'sokil dataset init-clips' to describe them: "
-                f"{', '.join(sorted(new))}",
-                err=True,
-            )
-        return rows
+    kept, new, dropped = for_dataset_clips(rows, known, named_tasks)
 
-    skipped = {row["clip_id"] for row in rows} - known
-    if skipped:
+    if new:
         typer.echo(
-            f"Skipping {len(skipped)} clip(s) not in clips.csv: "
-            f"{', '.join(sorted(skipped))}. Name a task with --task-id to "
+            f"{len(new)} clip(s) are not in clips.csv yet; run "
+            f"'sokil dataset refresh' to describe them: {', '.join(sorted(new))}",
+            err=True,
+        )
+    if dropped:
+        typer.echo(
+            f"Skipping {len(dropped)} clip(s) not in clips.csv: "
+            f"{', '.join(sorted(dropped))}. Name a task with --task-id to "
             f"import one anyway.",
             err=True,
         )
 
-    kept = [row for row in rows if row["clip_id"] in known]
     if not kept:
         typer.echo("Nothing left to import", err=True)
         raise typer.Exit(code=1)
+
     return kept
 
 
 def _clips_to_evaluate(dataset, events, tracks, split: str) -> list[str]:
-    """The clips a configuration can be measured on, honouring the split."""
-    wanted = sorted(set(events["clip_id"]) & set(tracks["clip_id"]))
+    """Report which clips can be measured, and stop if none can."""
+    from sokil.evaluation.run import SplitUnavailable, clips_to_measure
 
-    if split != "all":
-        splits = dataset.read_splits()
-        if split not in splits:
-            raise typer.BadParameter(f"{split!r} is not a split")
-        if not splits[split]:
-            typer.echo(
-                f"The {split} split is empty — run 'sokil dataset split' first",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        wanted = [clip for clip in wanted if clip in set(splits[split])]
-
-    if not wanted:
-        typer.echo("No clip has both landings and a ground-truth track", err=True)
-        raise typer.Exit(code=1)
-
-    return wanted
-
-
-def _evaluation_models(
-    shuttle_path: str | None, court_path: str | None, need_court: bool
-):
-    """
-    The weights the model-backed configurations run, and what they expect.
-
-    Taken from the published manifest rather than assumed: the weights declare
-    the frames they were trained on, and feeding them anything else measures
-    the mismatch instead of the model.
-    """
-    from sokil.models import Segmenter
-    from sokil.settings import ModelName, ensure_model_path, model_spec
-
-    shuttle_expects = model_spec(ModelName.SHUTTLE).expects
-    shuttle_kwargs = {
-        "model": shuttle_path or str(ensure_model_path(ModelName.SHUTTLE)),
-        "imgsz": shuttle_expects.get("imgsz", 640),
-    }
-
-    court_kwargs = None
-    if need_court:
-        court_expects = model_spec(ModelName.COURT).expects
-        court_kwargs = {
-            "segmentation_model": Segmenter(
-                court_path or str(ensure_model_path(ModelName.COURT)),
-                imgsz=court_expects.get("imgsz", 640),
-            ),
-            "keypoint_model": None,
-        }
-
-    return shuttle_expects.get("grayscale", True), shuttle_kwargs, court_kwargs
+    try:
+        return clips_to_measure(dataset, events, tracks, split)
+    except SplitUnavailable as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from None
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from None
 
 
 # Widest a clip's name may be in the table before its middle is stripped.
@@ -1323,7 +1259,6 @@ MAX_CLIP_COLUMN = 34
 
 def _echo_evaluation_table(results, totals):
     """The per-clip figures, and the pooled ones beneath them."""
-    from sokil.evaluation.metrics import MATCH_WINDOW_FRAMES
 
     clip_width = min(
         max((len(_trim_clip(result.clip_id)) for result in results), default=6),
@@ -1371,22 +1306,6 @@ def _echo_evaluation_table(results, totals):
             f"\nleft out of the pooled court_error: {court['flipped']} flipped, "
             f"{court['unsolved']} with no court solved"
         )
-
-    typer.echo(
-        "\nlandings: labelled in the dataset.  matched: found within "
-        f"{MATCH_WINDOW_FRAMES} frames of a labelled landing."
-        "\nmissed: labelled but not found.  false_positives: found but accounting "
-        "for no labelled landing."
-        "\nposition_error: median distance from the labelled landing, over "
-        "the matched ones.  verdict_correctness: of those, how many calls "
-        "were right."
-        "\ncourt_error: how far this run's court places your clicked vertices "
-        "from where they truly sit. With your own court that is your clicking "
-        "precision; with a solved one it adds the solver's error on top."
-        "\n'failed': no court solved, so nothing below it could be judged.  "
-        "'FLIPPED': right shape end-for-end, so verdicts survive but "
-        "coordinates mirror."
-    )
 
     verdict = totals["verdict_correctness"]
     if verdict["called_in_was_out"] or verdict["called_out_was_in"]:

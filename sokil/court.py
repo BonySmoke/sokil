@@ -35,6 +35,35 @@ logger = logging.getLogger(__name__)
 MIN_END_SEPARATION_PX = 5.0
 
 
+# A homography needs four points, and four fit one exactly: with no spare, a
+# mistaken point produces a perfect fit through the wrong court.
+MIN_POINTS_FOR_HOMOGRAPHY = 4
+
+
+def vertex_coordinates(vertices: list[int]) -> np.ndarray:
+    """Where each 1-based court vertex sits on the court, in centimetres."""
+    model = CourtModel().vertices
+    return np.array([model[number - 1] for number in vertices], dtype=np.float64)
+
+
+def homography_from_vertices(vertices: list[int], pixels) -> np.ndarray | None:
+    """
+    The image->court homography a set of located vertices implies, or None.
+
+    ViewTransformer holds image->court, so this is the direction the pipeline
+    wants. Plain least squares rather than RANSAC: these points are named one
+    by one, so a stray one is a mistake to surface, not noise to discard.
+    """
+    if len(vertices) < MIN_POINTS_FOR_HOMOGRAPHY:
+        return None
+
+    source = np.asarray(pixels, dtype=np.float32)
+    target = vertex_coordinates(vertices).astype(np.float32)
+
+    matrix, _ = cv2.findHomography(source, target, 0)
+    return matrix
+
+
 class CourtCameraMode(Enum):
     FULL = "full"
     LEFT_CORRIDOR = "left_corridor"
@@ -151,6 +180,34 @@ class Court:
             court_camera_mode=self.court_config.court_camera_mode,
             court_model_type=self.court_config.court_model_type,
         )
+
+    @classmethod
+    def from_points(
+        cls,
+        vertices: list[int],
+        pixels,
+        court_config: "CourtConfig | None" = None,
+        image=None,
+    ) -> "Court":
+        """
+        A court placed by naming where its own vertices are in the image.
+
+        :param vertices: CourtModel vertex numbers, 1-based.
+        :param pixels: where each of those vertices sits, in image pixels.
+
+        The homography is fitted image->court directly rather than fitted the
+        other way and inverted, so a near-singular fit fails here instead of
+        producing a matrix that inverts badly.
+
+        :returns: the court, or None where the points cannot place one — fewer
+            than four, or an arrangement a homography cannot be fitted to, such
+            as vertices that all lie on one line.
+        """
+        matrix = homography_from_vertices(vertices, pixels)
+        if matrix is None:
+            return None
+
+        return cls.from_homography(matrix, court_config=court_config, image=image)
 
     @classmethod
     def from_homography(

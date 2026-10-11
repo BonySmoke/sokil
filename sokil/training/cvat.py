@@ -8,6 +8,7 @@ CVAT_USERNAME, CVAT_PASSWORD.
 import logging
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -39,6 +40,68 @@ def make_cvat_client():
         )
 
     return make_client(host=url, credentials=(username, password))
+
+
+class CvatSession:
+    """
+    CVAT Session
+    """
+
+    def __init__(self, client):
+        self.client = client
+
+    @classmethod
+    @contextmanager
+    def open(cls):
+        """A session over a client of its own, closed when the block ends."""
+        with make_cvat_client() as client:
+            yield cls(client)
+
+    def project(self, name: str):
+        return find_project(self.client, name)
+
+    def tasks(self, project_name: str, task_ids: list[int] | None = None) -> list:
+        """
+        The project's tasks, in id order, narrowed to task_ids when given.
+
+        Ordered so that two runs over the same project import in the same
+        order, which is what makes a rebuilt table compare cleanly against the
+        one before it.
+        """
+        tasks = list(self.client.tasks.list(project_id=self.project(project_name).id))
+        if task_ids is not None:
+            wanted = set(task_ids)
+            tasks = [task for task in tasks if task.id in wanted]
+
+        return sorted(tasks, key=lambda task: task.id)
+
+    def completed(self, task) -> bool:
+        """
+        Whether every annotation job on a task is marked done.
+
+        Ground truth jobs are ignored: they are a review mechanism, not part of
+        the annotation being waited on.
+        """
+        jobs = [
+            job for job in task.get_jobs() if _enum_value(job.type) != "ground_truth"
+        ]
+        return bool(jobs) and all(_enum_value(job.state) == "completed" for job in jobs)
+
+    def sublabel_names(self, project_name: str) -> dict[int, str]:
+        """Every skeleton sublabel id in the project, to its name."""
+        labels = self.project(project_name).get_labels()
+        skeletons = [label for label in labels if getattr(label, "sublabels", None)]
+        if not skeletons:
+            raise ValueError(
+                f"CVAT project {project_name!r} has no skeleton label to read "
+                f"court vertices from"
+            )
+
+        return {
+            sublabel.id: sublabel.name
+            for label in skeletons
+            for sublabel in label.sublabels
+        }
 
 
 def court_skeleton_svg(sublabel_ids: dict[int, int] | None = None) -> str:

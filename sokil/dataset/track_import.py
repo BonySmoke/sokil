@@ -141,6 +141,7 @@ def import_tracks(
     clip_ids: dict[int, str] | None = None,
     known_clips: set[str] | None = None,
     completed_only: bool = True,
+    session=None,
 ) -> list[dict]:
     """
     Read shuttle annotations from CVAT and return tracks rows.
@@ -150,35 +151,20 @@ def import_tracks(
     against it would count the annotator's unfinished work as the algorithm's
     failure.
     """
-    from ..training.cvat import _enum_value, find_project, make_cvat_client
-    from .cvat_import import resolve_clip_id
+    from .cvat_import import open_session, resolve_clip_id
 
     clip_ids = clip_ids or {}
     rows = []
 
-    with make_cvat_client() as client:
-        project = find_project(client, project_name)
-
-        tasks = list(client.tasks.list(project_id=project.id))
-        if task_ids is not None:
-            tasks = [task for task in tasks if task.id in set(task_ids)]
-
-        for task in sorted(tasks, key=lambda t: t.id):
-            if completed_only:
-                jobs = [
-                    job
-                    for job in task.get_jobs()
-                    if _enum_value(job.type) != "ground_truth"
-                ]
-                if not jobs or not all(
-                    _enum_value(job.state) == "completed" for job in jobs
-                ):
-                    logger.info(
-                        "Skipping task %d (%s): not all jobs completed",
-                        task.id,
-                        task.name,
-                    )
-                    continue
+    with open_session(session) as cvat:
+        for task in cvat.tasks(project_name, task_ids):
+            if completed_only and not cvat.completed(task):
+                logger.info(
+                    "Skipping task %d (%s): not all jobs completed",
+                    task.id,
+                    task.name,
+                )
+                continue
 
             clip_id = resolve_clip_id(task, known_clips, clip_ids.get(task.id))
             rows += track_rows(task, clip_id)

@@ -10,11 +10,13 @@ import pandas as pd
 
 from . import schema
 from .schema import Call
+from .splits import SUBSET_SPLITS
 
 logger = logging.getLogger(__name__)
 
-# TODO: looks like a duplication of splits.py just without extra mapping
-SPLITS = ("train", "valid", "test")
+# The split names, taken from the mapping that defines them rather than
+# written out again: a second list is a second thing to keep in step.
+SPLITS = tuple(dict.fromkeys(SUBSET_SPLITS.values()))
 
 
 class DatasetError(RuntimeError):
@@ -24,13 +26,12 @@ class DatasetError(RuntimeError):
 @dataclass(frozen=True)
 class Dataset:
     """
-    TODO: the comment is hard to maintain, tracks.csv is already missing
     An annotation dataset rooted at a directory.
 
-        <root>/clips.csv
-        <root>/events.csv
-        <root>/court_points.csv               optional, generated from CVAT
-        <root>/splits/{train,valid,test}.txt  one clip_id per line
+    One <root>/<table>.csv per table in schema.SCHEMAS, and
+    <root>/splits/<split>.txt holding one clip_id per line. The tables are not
+    listed here on purpose: a list written out by hand goes stale the first
+    time one is added, which it already had.
     """
 
     root: Path

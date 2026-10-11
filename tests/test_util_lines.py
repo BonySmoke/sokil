@@ -414,6 +414,9 @@ class TestFamilyAssignments:
         assert len(assignments[-1]) == 2
 
     def test_every_assignment_preserves_order_on_both_sides(self):
+        # Order-preserving in either direction: which way a model axis runs
+        # across the image is a fact about where the camera stands, so the
+        # lines can legitimately arrive in the opposite order.
         detected = ["a", "b", "c"]
         expected = [1, 2, 3, 4]
 
@@ -421,7 +424,28 @@ class TestFamilyAssignments:
             lines = [line for line, _ in assignment]
             coords = [coord for _, coord in assignment]
             assert lines == sorted(lines, key=detected.index)
-            assert coords == sorted(coords)
+            assert coords in (sorted(coords), sorted(coords, reverse=True))
+
+    def test_both_directions_are_offered(self):
+        # A court seen from the far side has its model axis running the other
+        # way. Offering only one direction means the right court is never a
+        # candidate, and no amount of scoring can choose what was never there.
+        assignments = _family_assignments(["a", "b"], [0, 1340])
+
+        coords = [tuple(coord for _, coord in assignment) for assignment in assignments]
+        assert (0, 1340) in coords
+        assert (1340, 0) in coords
+
+    def test_the_two_directions_are_kept_adjacent(self):
+        # The caller sorts by how many lines a candidate explains and caps the
+        # list. A stable sort keeps neighbours together, so adjacency is what
+        # stops the cap dropping one orientation wholesale.
+        assignments = _family_assignments(["a", "b"], [0, 1340])
+
+        for index in range(0, len(assignments), 2):
+            first = [coord for _, coord in assignments[index]]
+            second = [coord for _, coord in assignments[index + 1]]
+            assert first == list(reversed(second))
 
     def test_a_single_line_cannot_span_a_homography_grid(self):
         assert _family_assignments(["a"], [1]) == []
@@ -436,9 +460,10 @@ class TestIdentifyLineCandidates:
             verticals, horizontals, expected_x=[0, 610], expected_y=[0, 1340]
         )
 
-        assert len(candidates) == 1
-        assert len(candidates[0]["vertical"]) == 2
-        assert len(candidates[0]["horizontal"]) == 2
+        # Two orderings per family, so four pairings of the two families.
+        assert len(candidates) == 4
+        assert all(len(candidate["vertical"]) == 2 for candidate in candidates)
+        assert all(len(candidate["horizontal"]) == 2 for candidate in candidates)
 
     def test_the_richest_candidate_is_tried_first(self):
         verticals = [hesse_line(r, VERTICAL_THETA) for r in (100, 400, 700)]

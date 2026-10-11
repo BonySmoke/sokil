@@ -1,9 +1,9 @@
 """
-TODO: turn this into a single CVAT client outside of this module.
 Turn CVAT court-keypoint annotations into court_points.csv
 """
 
 import logging
+from contextlib import contextmanager
 from itertools import pairwise
 
 import numpy as np
@@ -12,6 +12,25 @@ from .court import resolve_vertex
 from .schema import PointSource
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def open_session(session):
+    """
+    The session given, or one of this call's own.
+
+    Lets a command open a single connection and hand it round, while a lone
+    call still works without the caller knowing CVAT is involved.
+    """
+    from ..training.cvat import CvatSession
+
+    if session is not None:
+        yield session
+        return
+
+    with CvatSession.open() as opened:
+        yield opened
+
 
 # How far the court must move for a keyframe to be a new court rather than the
 # previous one re-confirmed. A click that does not drag leaves a keyframe at
@@ -226,21 +245,18 @@ def read_subsets(
     project_name: str,
     clip_ids: dict[int, str] | None = None,
     known_clips: set[str] | None = None,
+    session=None,
 ) -> dict[str, str]:
     """
     Each clip's CVAT subset, from the tasks of one project.
 
     :returns: clip_id -> the subset string CVAT holds, which may be empty.
     """
-    from ..training.cvat import find_project, make_cvat_client
-
     clip_ids = clip_ids or {}
     subsets = {}
 
-    with make_cvat_client() as client:
-        project = find_project(client, project_name)
-
-        for task in client.tasks.list(project_id=project.id):
+    with open_session(session) as cvat:
+        for task in cvat.tasks(project_name):
             clip_id = resolve_clip_id(task, known_clips, clip_ids.get(task.id))
             subset = getattr(task, "subset", "") or ""
 
@@ -262,6 +278,7 @@ def import_court_points(
     clip_ids: dict[int, str] | None = None,
     tolerance: float = KEYFRAME_TOLERANCE_PX,
     known_clips: set[str] | None = None,
+    session=None,
 ) -> list[dict]:
     """
     Read court keypoint tasks from CVAT and return court_points rows.
@@ -456,3 +473,27 @@ def resolve_clip_id(
         )
 
     return candidates[0]
+
+
+def for_dataset_clips(
+    rows: list[dict], known: set[str] | None, named_tasks: bool
+) -> tuple[list[dict], set[str], set[str]]:
+    """
+    Keep only the rows belonging to clips the dataset knows about.
+
+    clips.csv is the register of what belongs, so sweeping a whole project
+    would otherwise pull in old tasks and other people's work. A task named by
+    the caller is exempt: naming it is the instruction, and a clip has to reach
+    the tables somehow before it can be described — filtering it out here would
+    make the first import of a new clip impossible.
+
+    :returns: the rows to keep, the clips that are new to the dataset, and the
+        clips that were dropped. The caller decides what to say about each.
+    """
+    seen = {row["clip_id"] for row in rows}
+
+    if known is None or named_tasks:
+        return rows, seen - (known or set()), set()
+
+    dropped = seen - known
+    return [row for row in rows if row["clip_id"] in known], set(), dropped

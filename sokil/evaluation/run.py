@@ -507,3 +507,73 @@ def _pooled_median(medians: list[float | None]) -> float | None:
     """
     present = [median for median in medians if median is not None]
     return None if not present else round(float(np.median(present)), 1)
+
+
+class SplitUnavailable(RuntimeError):
+    """The split asked for has no clips in it yet."""
+
+
+def clips_to_measure(dataset, events, tracks, split: str) -> list[str]:
+    """
+    The clips a configuration can be measured on, honouring the split.
+
+    A clip needs landings to be measured against and a ground-truth track to be
+    measured without the models, so it qualifies only when it has both.
+    """
+    from ..dataset.store import SPLITS
+
+    wanted = sorted(set(events["clip_id"]) & set(tracks["clip_id"]))
+
+    if split != "all":
+        if split not in SPLITS:
+            raise ValueError(
+                f"{split!r} is not a split; expected {sorted(SPLITS)} or 'all'"
+            )
+
+        clips = set(dataset.read_splits()[split])
+        if not clips:
+            raise SplitUnavailable(
+                f"The {split} split is empty — run 'sokil dataset split' first"
+            )
+        wanted = [clip for clip in wanted if clip in clips]
+
+    if not wanted:
+        raise SplitUnavailable("No clip has both landings and a ground-truth track")
+
+    return wanted
+
+
+def models_for(
+    shuttle_path: str | None, court_path: str | None, need_court: bool
+) -> tuple[bool, dict, dict | None]:
+    """
+    The weights the model-backed configurations run, and what they expect.
+
+    Taken from the published manifest rather than assumed: the weights declare
+    the frames they were trained on, and feeding them anything else measures
+    the mismatch instead of the model.
+
+    :returns: whether to feed grayscale, the shuttle detector's arguments, and
+        the court detector's — the last only when a court has to be solved.
+    """
+    from ..models import Segmenter
+    from ..settings import ModelName, ensure_model_path, model_spec
+
+    shuttle_expects = model_spec(ModelName.SHUTTLE).expects
+    shuttle_kwargs = {
+        "model": shuttle_path or str(ensure_model_path(ModelName.SHUTTLE)),
+        "imgsz": shuttle_expects.get("imgsz", 640),
+    }
+
+    court_kwargs = None
+    if need_court:
+        court_expects = model_spec(ModelName.COURT).expects
+        court_kwargs = {
+            "segmentation_model": Segmenter(
+                court_path or str(ensure_model_path(ModelName.COURT)),
+                imgsz=court_expects.get("imgsz", 640),
+            ),
+            "keypoint_model": None,
+        }
+
+    return shuttle_expects.get("grayscale", True), shuttle_kwargs, court_kwargs

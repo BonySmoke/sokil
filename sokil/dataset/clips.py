@@ -13,6 +13,7 @@ from . import schema
 
 logger = logging.getLogger(__name__)
 
+
 def is_empty(value) -> bool:
     """
     Whether a cell has an answer in it.
@@ -225,3 +226,23 @@ def blank_columns(rows: list[dict]) -> dict[str, list[str]]:
         if empty:
             missing[row["clip_id"]] = empty
     return missing
+
+
+def undescribed_recordings(
+    videos_dir: Path, described: set[str], extensions: set[str]
+) -> list[str]:
+    """
+    Recordings in the folder the dataset knows nothing about.
+
+    They are left out because nothing is annotated on them, which is correct —
+    but a caller that says nothing about a file the user can see reads as
+    having missed it, so they are named rather than passed over.
+    """
+    if not videos_dir.is_dir():
+        return []
+
+    return sorted(
+        path.stem
+        for path in videos_dir.iterdir()
+        if path.suffix.lower() in extensions and path.stem not in described
+    )

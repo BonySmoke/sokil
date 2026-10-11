@@ -60,10 +60,9 @@ def resolve_vertex(name: str) -> int:
 
 def court_coordinates(vertices: list[int]) -> np.ndarray:
     """The court-model position, in centimetres, of each 1-based vertex number."""
-    from ..court import CourtModel
+    from ..court import vertex_coordinates
 
-    model = CourtModel().vertices
-    return np.array([model[number - 1] for number in vertices], dtype=np.float64)
+    return vertex_coordinates(vertices)
 
 
 def fit_homography(vertices: list[int], points: np.ndarray):
@@ -110,29 +109,13 @@ def reprojection_residuals(
     return np.linalg.norm(projected - np.asarray(points, dtype=np.float64), axis=1)
 
 
-# TODO: check if this should be a part of of the Court class, not a dataset function
 def image_to_court_homography(vertices: list[int], points: np.ndarray):
-    """
-    The image->court homography these annotated vertices imply, or None.
+    """The image->court homography these vertices imply, or None."""
+    from ..court import homography_from_vertices
 
-    The other direction from fit_homography, and the one the pipeline wants:
-    ViewTransformer holds image->court, so Court.from_homography expects that
-    way round. Fitted directly rather than inverted, so a near-singular fit
-    fails here instead of producing a matrix that inverts badly.
-    """
-    import cv2
-
-    if len(vertices) < MIN_POINTS_FOR_HOMOGRAPHY:
-        return None
-
-    source = np.asarray(points, dtype=np.float32)
-    target = court_coordinates(vertices).astype(np.float32)
-
-    matrix, _ = cv2.findHomography(source, target, 0)
-    return matrix
+    return homography_from_vertices(vertices, points)
 
 
-# TODO: check if this should be a part of of the Court class, not a dataset function
 def court_from_points(court_points, clip_id: str, frame: int = 0, court_config=None):
     """
     A Court placed by the annotated keypoints rather than solved from the video.
@@ -149,10 +132,12 @@ def court_from_points(court_points, clip_id: str, frame: int = 0, court_config=N
         raise ValueError(f"No court keypoints for clip {clip_id!r}")
 
     visible = keyframe[keyframe["visible"]]
-    matrix = image_to_court_homography(
-        list(visible["vertex"]), visible[["x_px", "y_px"]].to_numpy()
+    court = Court.from_points(
+        list(visible["vertex"]),
+        visible[["x_px", "y_px"]].to_numpy(),
+        court_config=court_config,
     )
-    if matrix is None:
+    if court is None:
         raise ValueError(f"Court keypoints for clip {clip_id!r} place no court")
 
-    return Court.from_homography(matrix, court_config=court_config)
+    return court
