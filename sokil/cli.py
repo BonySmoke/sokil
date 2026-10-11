@@ -690,7 +690,7 @@ def dataset_refresh(
     if not videos:
         raise typer.Exit(code=1)
 
-    rows = clip_rows(videos, events, court_points, existing)
+    rows = clip_rows(videos, events, court_points, existing, Path(path))
     dataset.write("clips", pd.DataFrame(rows, columns=columns("clips")))
     typer.echo(f"clips.csv: {len(rows)} clip(s) described")
 

@@ -125,6 +125,7 @@ class Dataset:
         events = self.read("events")
 
         problems = _schema_problems("clips", clips)
+        problems += _source_problems(self.root, clips)
         problems += _schema_problems("events", events)
         problems += _cross_table_problems(clips, events)
         problems += _split_problems(clips, self.read_splits())
@@ -183,6 +184,31 @@ def _schema_problem(table: str, failure) -> str:
         return f"{table}.csv: {where} is empty, and {failure.check} needs a value"
 
     return f"{table}.csv: {failure.check} failed for {where} (value {value!r})"
+
+
+def _source_problems(root: Path, clips: pd.DataFrame) -> list[str]:
+    """
+    Recordings a clip points at that are not where it says.
+
+    source_uri is what a reader follows to find the footage, so a path that
+    resolves nowhere is worse than an empty cell: the empty cell says the video
+    is not here, and the dangling one says it is. A URL is taken on trust —
+    checking it would mean reaching out over the network to validate a table.
+    """
+    problems = []
+
+    for clip in clips.itertuples():
+        uri = clip.source_uri
+        if pd.isna(uri) or str(uri).startswith(("http://", "https://")):
+            continue
+
+        if not (root / str(uri)).is_file():
+            problems.append(
+                f"clips.csv: clip {clip.clip_id!r} points at {uri!r}, which is "
+                f"not a file under {root}"
+            )
+
+    return problems
 
 
 def _cross_table_problems(clips: pd.DataFrame, events: pd.DataFrame) -> list[str]:

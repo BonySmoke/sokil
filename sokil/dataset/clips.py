@@ -177,11 +177,37 @@ def observed_camera_mode(court_points: pd.DataFrame, clip_id: str) -> str | None
 
 # TODO: turn rows into data classes
 # Also check if validation can be done at the data class level
+def source_uri(video_path: Path, dataset_root: Path | None) -> str | None:
+    """
+    Where a recording sits, as the dataset will carry it.
+
+    A path relative to the dataset root, so it still resolves wherever the
+    release is unpacked. A recording kept outside that root gets nothing rather
+    than a path climbing out with "..": that would resolve on this machine and
+    nowhere else, which is worse than an honest blank.
+    """
+    if dataset_root is None:
+        return None
+
+    try:
+        relative = video_path.resolve().relative_to(dataset_root.resolve())
+    except ValueError:
+        logger.info(
+            "%s is outside %s, so it has no path the dataset can carry",
+            video_path.name,
+            dataset_root,
+        )
+        return None
+
+    return str(relative)
+
+
 def clip_rows(
     videos: dict[str, Path],
     events: pd.DataFrame | None = None,
     court_points: pd.DataFrame | None = None,
     existing: pd.DataFrame | None = None,
+    dataset_root: Path | None = None,
 ) -> list[dict]:
     """
     A clips.csv row per clip, with whatever can be established already filled.
@@ -200,6 +226,9 @@ def clip_rows(
 
         row["clip_id"] = clip_id
         row.update(probe(video_path))
+
+        if is_empty(row.get("source_uri")):
+            row["source_uri"] = source_uri(video_path, dataset_root)
 
         if is_empty(row.get("session_id")):
             row["session_id"] = session_id(clip_id)

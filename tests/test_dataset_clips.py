@@ -16,6 +16,7 @@ from sokil.dataset.clips import (
     observed_court_type,
     probe,
     session_id,
+    source_uri,
 )
 from sokil.dataset.schema import columns
 
@@ -285,3 +286,54 @@ class TestObservedCameraMode:
         points = pd.DataFrame([{"clip_id": "clip_b", "vertex": 1, "visible": True}])
 
         assert observed_camera_mode(points, "clip_a") is None
+
+
+class TestSourceUri:
+    """
+    Where a clip says its recording is. It has to resolve wherever the release
+    is unpacked, not just on the machine that wrote it.
+    """
+
+    def test_a_recording_inside_the_dataset_gets_a_relative_path(self, tmp_path):
+        root = tmp_path / "dataset"
+        videos = root / "videos"
+        videos.mkdir(parents=True)
+        video = videos / "clip_a.mp4"
+        video.write_bytes(b"")
+
+        assert source_uri(video, root) == "videos/clip_a.mp4"
+
+    def test_a_recording_outside_the_dataset_gets_nothing(self, tmp_path):
+        # "../somewhere" resolves on this machine and nowhere else, which is
+        # worse than an honest blank.
+        root = tmp_path / "dataset"
+        root.mkdir()
+        outside = tmp_path / "elsewhere" / "clip_a.mp4"
+        outside.parent.mkdir()
+        outside.write_bytes(b"")
+
+        assert source_uri(outside, root) is None
+
+    def test_without_a_dataset_root_there_is_nothing_to_be_relative_to(self, tmp_path):
+        assert source_uri(tmp_path / "clip_a.mp4", None) is None
+
+    def test_it_is_filled_in_when_the_recording_is_carried(self, video, tmp_path):
+        root = tmp_path
+        rows = clip_rows({"clip_a": video}, dataset_root=root)
+
+        assert rows[0]["source_uri"] == video.name
+
+    def test_a_uri_given_by_hand_is_kept(self, video, tmp_path):
+        existing = pd.DataFrame(
+            [
+                {
+                    **{c: None for c in columns("clips")},
+                    "clip_id": "clip_a",
+                    "source_uri": "https://example.org/clip_a.mp4",
+                }
+            ]
+        )
+
+        rows = clip_rows({"clip_a": video}, existing=existing, dataset_root=tmp_path)
+
+        assert rows[0]["source_uri"] == "https://example.org/clip_a.mp4"

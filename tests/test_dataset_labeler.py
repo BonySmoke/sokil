@@ -23,7 +23,7 @@ from sokil.dataset.schema import columns
 
 @pytest.fixture
 def session() -> Session:
-    return Session(clip_id="clip_a", court_type="doubles", annotator="oleh")
+    return Session(clip_id="clip_a", court_type="doubles", annotator="user")
 
 
 def to_court_stub(x_px, y_px):
@@ -153,7 +153,7 @@ class TestMerge:
                     "clip_id": "clip_b",
                     "frame": 10,
                     "call": "in",
-                    "annotator": "oleh",
+                    "annotator": "user",
                 },
             ],
             columns=columns("events"),
@@ -168,7 +168,7 @@ class TestMerge:
 
     def test_replaces_the_clip_being_labelled(self):
         existing = self.existing()
-        session = Session(clip_id="clip_b", annotator="oleh")
+        session = Session(clip_id="clip_b", annotator="user")
         session.call(99, "out")
 
         merged = merge_events(existing, "clip_b", event_rows(session))

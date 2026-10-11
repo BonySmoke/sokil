@@ -1,6 +1,6 @@
 # Dataset
 
-This document describes how to build a dataset to train and evaluate `Sokil`.
+This document describes how to build a dataset to evaluate `Sokil`.
 
 The purpose of the dataset is to evaluate the model performance on hit detection.
 

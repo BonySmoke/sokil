@@ -16,7 +16,7 @@ from sokil.dataset import Dataset, DatasetError, columns
 def clip_row(clip_id: str = "clip_a", **overrides) -> dict:
     row = {
         "clip_id": clip_id,
-        "source_uri": f"videos/{clip_id}.mp4",
+        "source_uri": None,
         "frame_count": 1000,
         "fps": 120.0,
         "width": 1920,
@@ -41,7 +41,7 @@ def event_row(clip_id: str = "clip_a", frame: int = 73, **overrides) -> dict:
         "y_px": 604.25,
         "x_m": 3.1416,
         "y_m": 5.25,
-        "annotator": "oleh",
+        "annotator": "user",
         "notes": None,
     }
     return {**row, **overrides}
@@ -117,8 +117,27 @@ class TestSchemaChecks:
 
         assert any("clip_id" in problem for problem in dataset.validate())
 
-    def test_rejects_a_local_absolute_path_as_a_source(self, tmp_path):
-        dataset = build(tmp_path, [clip_row(source_uri="/Users/oleh/videos/a.mp4")], [])
+    def test_a_source_that_is_not_there_is_reported(self, tmp_path):
+        # An empty cell says the video is not here; a dangling path says it is.
+        dataset = build(tmp_path, [clip_row(source_uri="videos/gone.mp4")], [])
+
+        assert any("not a file under" in problem for problem in dataset.validate())
+
+    def test_a_source_that_is_there_is_accepted(self, tmp_path):
+        (tmp_path / "videos").mkdir()
+        (tmp_path / "videos" / "clip_a.mp4").write_bytes(b"")
+
+        dataset = build(tmp_path, [clip_row(source_uri="videos/clip_a.mp4")], [])
+
+        assert dataset.validate() == []
+
+    def test_a_url_is_taken_on_trust(self, tmp_path):
+        # Checking it would mean reaching over the network to validate a table.
+        dataset = build(
+            tmp_path, [clip_row(source_uri="https://example.org/clip_a.mp4")], []
+        )
+
+        assert dataset.validate() == []
 
         assert any("source_uri" in problem for problem in dataset.validate())
 
