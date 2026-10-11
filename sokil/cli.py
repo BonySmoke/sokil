@@ -1090,9 +1090,10 @@ def evaluate(
     configuration: Annotated[
         list[str] | None,
         typer.Option(
-            help="Which configuration(s) to measure (repeatable): "
-            "'algorithm' substitutes ground truth for both models, 'detector' "
-            "only for the court, 'system' for neither. Default: algorithm"
+            help="Which configuration(s) to measure (repeatable): 'manual' "
+            "takes both the boxes and the court from the annotations, "
+            "'shuttle-detector' only the court, 'automatic' neither. "
+            "Default: manual"
         ),
     ] = None,
     split: Annotated[
@@ -1116,39 +1117,31 @@ def evaluate(
     verbose: Annotated[bool, typer.Option(help="Enable verbose logging")] = False,
 ):
     """
-    Measure whether the hit detection is right, against the dataset.
+    Measure the correctness of the hit detection algorithm.
 
-    Three configurations over one ground truth, so a change can be credited to
-    whatever caused it:
+    Three configurations over one ground truth:
 
     \b
-      algorithm  annotated boxes, annotated court — the logic alone
-      detector   model boxes, annotated court     — plus the shuttle detector
-      system     model boxes, solved court        — as it ships
+      manual            annotated boxes, annotated court — the logic alone
+      shuttle-detector  model boxes, annotated court     — plus the detector
+      automatic         model boxes, solved court        — as it ships
 
-    The algorithm configuration is the one to tune against: HitDetectionConfig
-    carries seven hand-set thresholds meant to be swept, and a figure that also
-    moves when a model is retrained cannot tell you whether a sweep helped.
-
-    Every run writes a JSON record carrying the commit, the thresholds, a
-    digest of each dataset table and the versions that could change a figure.
-    How fast the pipeline runs is a separate measurement — benchmarking — and
-    belongs in the same record, not under this name.
+    Every run writes a JSON record with the evaluation results.
     """
     from sokil.dataset import Dataset
     from sokil.evaluation import report
     from sokil.evaluation.run import (
         CONFIGURATIONS,
-        run_algorithm,
-        run_detector,
-        run_system,
+        run_automatic,
+        run_manual,
+        run_shuttle_detector,
         summarise,
     )
     from sokil.hits import HitDetectionConfig
 
     configure_logging(verbose)
 
-    wanted_configurations = configuration or ["algorithm"]
+    wanted_configurations = configuration or ["manual"]
     unknown = [name for name in wanted_configurations if name not in CONFIGURATIONS]
     if unknown:
         raise typer.BadParameter(
@@ -1166,13 +1159,13 @@ def evaluate(
 
     # The models declare the frames they were trained on, so that is what they
     # are fed — the same reasoning as the review command.
-    needs_models = {"detector", "system"} & set(wanted_configurations)
+    needs_models = {"shuttle-detector", "automatic"} & set(wanted_configurations)
     grayscale, shuttle_kwargs, court_kwargs = True, None, None
     if needs_models:
         grayscale, shuttle_kwargs, court_kwargs = _evaluation_models(
             shuttle_detector_model_path,
             court_segmentation_model_path,
-            need_court="system" in wanted_configurations,
+            need_court="automatic" in wanted_configurations,
         )
 
     results = []
@@ -1193,14 +1186,14 @@ def evaluate(
                 "grayscale": grayscale,
             }
 
-            if name == "algorithm":
-                result = run_algorithm(clip_id, video, tracks=tracks, **common)
-            elif name == "detector":
-                result = run_detector(
+            if name == "manual":
+                result = run_manual(clip_id, video, tracks=tracks, **common)
+            elif name == "shuttle-detector":
+                result = run_shuttle_detector(
                     clip_id, video, shuttle_detector_kwargs=shuttle_kwargs, **common
                 )
             else:
-                result = run_system(
+                result = run_automatic(
                     clip_id,
                     video,
                     shuttle_detector_kwargs=shuttle_kwargs,
@@ -1324,12 +1317,22 @@ def _evaluation_models(
     return shuttle_expects.get("grayscale", True), shuttle_kwargs, court_kwargs
 
 
+# Widest a clip's name may be in the table before its middle is stripped.
+MAX_CLIP_COLUMN = 34
+
+
 def _echo_evaluation_table(results, totals):
     """The per-clip figures, and the pooled ones beneath them."""
     from sokil.evaluation.metrics import MATCH_WINDOW_FRAMES
 
+    clip_width = min(
+        max((len(_trim_clip(result.clip_id)) for result in results), default=6),
+        MAX_CLIP_COLUMN,
+    )
+    column = clip_width + 2
+
     header = (
-        f"{'clip':<26}{'landings':>9}{'matched':>9}{'missed':>8}{'false_positives':>17}"
+        f"{'clip':<{column}}{'landings':>9}{'matched':>9}{'missed':>8}{'false_positives':>17}"
         f"{'precision':>11}{'recall':>9}{'position_error':>16}{'verdict_correctness':>21}"
         f"{'court_error':>13}"
     )
@@ -1339,7 +1342,7 @@ def _echo_evaluation_table(results, totals):
     for result in results:
         detection = result.detection
         typer.echo(
-            f"{_short_clip(result.clip_id):<26}"
+            f"{_short_clip(result.clip_id, clip_width):<{column}}"
             f"{detection['labelled']:>9}{detection['matched']:>9}"
             f"{detection['missed']:>8}{detection['false_positives']:>17}"
             f"{_percentage(detection['precision']):>11}"
@@ -1352,15 +1355,22 @@ def _echo_evaluation_table(results, totals):
     detection = totals["detection"]
     typer.echo("-" * len(header))
     typer.echo(
-        f"{'pooled':<26}"
+        f"{'pooled':<{column}}"
         f"{detection['labelled']:>9}{detection['matched']:>9}"
         f"{detection['missed']:>8}{detection['false_positives']:>17}"
         f"{_percentage(detection['precision']):>11}"
         f"{_percentage(detection['recall']):>9}"
         f"{_centimetres(totals['position_error']['median_cm']):>16}"
         f"{_percentage(totals['verdict_correctness']['accuracy']):>21}"
-        f"{'':>13}"
+        f"{_pooled_court(totals['court_error']):>13}"
     )
+
+    court = totals["court_error"]
+    if court["flipped"] or court["unsolved"]:
+        typer.echo(
+            f"\nleft out of the pooled court_error: {court['flipped']} flipped, "
+            f"{court['unsolved']} with no court solved"
+        )
 
     typer.echo(
         "\nlandings: labelled in the dataset.  matched: found within "
@@ -1386,6 +1396,12 @@ def _echo_evaluation_table(results, totals):
         )
 
 
+def _pooled_court(court: dict) -> str:
+    """The pooled court error, or a dash where no court could contribute one."""
+    median = court.get("median_cm")
+    return "-" if median is None else f"{median:.0f}cm"
+
+
 def _court_offset(result) -> str:
     """How far this run's court places the annotated vertices from the truth."""
     if not result.court_solved:
@@ -1398,19 +1414,30 @@ def _court_offset(result) -> str:
     return "-" if vertex is None else f"{vertex['median']:.0f}cm"
 
 
-def _short_clip(clip_id: str, width: int = 25) -> str:
-    """
-    A clip id short enough for a table, keeping the part that identifies it.
-
-    The tail is the cutting tool's doing — "-merged-cut-merged-1784750377220" —
-    and is the same shape on every clip, so truncating from the right leaves
-    every row looking alike.
-    """
+def _trim_clip(clip_id: str) -> str:
+    """A clip id without the parts every clip shares."""
     import re
 
     trimmed = re.sub(r"(-merged)*-cut-merged-\d+$", "", clip_id)
-    trimmed = trimmed.removeprefix("volan_leva_")
-    return trimmed[:width]
+    return trimmed.removeprefix("volan_leva_")
+
+
+def _short_clip(clip_id: str, width: int) -> str:
+    """
+    A clip id short enough for a table, still telling it from its neighbours.
+
+    Cut from the right and clips recorded on one day collapse into each other:
+    court_6_right_20260419_101706 and ..._104345 share their first 25
+    characters, and the time that distinguishes them is exactly what falls off.
+    So the middle goes instead, keeping both ends.
+    """
+    trimmed = _trim_clip(clip_id)
+    if len(trimmed) <= width:
+        return trimmed
+
+    keep = width - 1
+    head = keep // 2
+    return trimmed[:head] + "…" + trimmed[head - keep :]
 
 
 def _percentage(value) -> str:

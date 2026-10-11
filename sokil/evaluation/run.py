@@ -38,9 +38,9 @@ logger = logging.getLogger(__name__)
 
 # What the configurations are called, and what each substitutes.
 CONFIGURATIONS = {
-    "algorithm": "ground-truth boxes, ground-truth court",
-    "detector": "model boxes, ground-truth court",
-    "system": "model boxes, solved court",
+    "manual": "annotated boxes, annotated court",
+    "shuttle-detector": "model boxes, annotated court",
+    "automatic": "model boxes, solved court",
 }
 
 
@@ -143,7 +143,7 @@ def run_clip(
     )
 
 
-def run_algorithm(
+def run_manual(
     clip_id: str,
     video_path,
     clip: pd.Series,
@@ -153,7 +153,7 @@ def run_algorithm(
     **kwargs,
 ) -> ClipResult:
     """
-    The algorithm alone: the annotator's boxes and the annotator's court.
+    Everything the hit detection needs, supplied by hand.
 
     Whatever the hit detection gets wrong here is its own, which is what makes
     this the figure to tune against — it does not move when a model is
@@ -165,14 +165,14 @@ def run_algorithm(
         clip,
         events,
         court_points,
-        configuration="algorithm",
+        configuration="manual",
         detector=ShuttleBoxSource(tracks, clip_id),
         court=ground_truth_court(clip_id, clip, court_points),
         **kwargs,
     )
 
 
-def run_detector(
+def run_shuttle_detector(
     clip_id: str,
     video_path,
     clip: pd.Series,
@@ -182,9 +182,9 @@ def run_detector(
     **kwargs,
 ) -> ClipResult:
     """
-    The algorithm and the shuttle detector, on the annotator's court.
+    The shuttle detector in place of the annotated boxes, court still by hand.
 
-    The difference from the algorithm configuration is the detector and nothing
+    The difference from the manual configuration is the detector and nothing
     else, so whatever moves between them is the detector's doing.
     """
     return run_clip(
@@ -193,7 +193,7 @@ def run_detector(
         clip,
         events,
         court_points,
-        configuration="detector",
+        configuration="shuttle-detector",
         detector=ShuttleDetector(
             shuttle_detector_kwargs["model"],
             confidence=(kwargs.get("tracker_config") or TrackerConfig()).confidence,
@@ -205,7 +205,7 @@ def run_detector(
     )
 
 
-def run_system(
+def run_automatic(
     clip_id: str,
     video_path,
     clip: pd.Series,
@@ -229,7 +229,7 @@ def run_system(
         clip,
         events,
         court_points,
-        configuration="system",
+        configuration="automatic",
         detector=ShuttleDetector(
             shuttle_detector_kwargs["model"],
             confidence=(kwargs.get("tracker_config") or TrackerConfig()).confidence,
@@ -462,21 +462,48 @@ def summarise(results: list[ClipResult]) -> dict:
         },
         "position_error": {
             "count": sum(result.position_error["count"] for result in results),
-            "median_cm": _pooled_median(results),
+            "median_cm": _pooled_median(
+                [result.position_error["median_cm"] for result in results]
+            ),
         },
+        "court_error": _pooled_court_error(results),
     }
 
 
-def _pooled_median(results: list[ClipResult]) -> float | None:
+def _pooled_court_error(results: list[ClipResult]) -> dict:
     """
-    The median of the per-clip medians, since the errors themselves are not kept.
+    How well the courts placed the annotated vertices, over every clip.
+
+    Flipped and unsolved clips are counted rather than folded in. A flipped
+    court's error is measured after unflipping, so averaging it into one figure
+    would report a court that is centimetres out when it is the length of the
+    court out; and a clip with no court has no error to contribute, only an
+    absence.
+    """
+    return {
+        "clips": sum(1 for result in results if result.court_error.get("vertex_cm")),
+        "median_cm": _pooled_median(
+            [
+                result.court_error["vertex_cm"]["median"]
+                for result in results
+                if result.court_error.get("vertex_cm")
+                and not result.court_error.get("flipped_end_for_end")
+            ]
+        ),
+        "flipped": sum(
+            1 for result in results if result.court_error.get("flipped_end_for_end")
+        ),
+        "unsolved": sum(1 for result in results if not result.court_solved),
+    }
+
+
+def _pooled_median(medians: list[float | None]) -> float | None:
+    """
+    The median of the per-clip medians, since the errors themselves are not
+    kept.
 
     An approximation, and labelled as one: a true pooled median would need
     every error retained, which the record does not carry.
     """
-    medians = [
-        result.position_error["median_cm"]
-        for result in results
-        if result.position_error["median_cm"] is not None
-    ]
-    return None if not medians else round(float(np.median(medians)), 1)
+    present = [median for median in medians if median is not None]
+    return None if not present else round(float(np.median(present)), 1)
