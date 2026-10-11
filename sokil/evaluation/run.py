@@ -51,9 +51,9 @@ class ClipResult:
     clip_id: str
     configuration: str
     detection: dict
-    position: dict
-    verdict: dict
-    court: dict = field(default_factory=dict)
+    position_error: dict
+    verdict_correctness: dict
+    court_error: dict = field(default_factory=dict)
     frames_tracked: int = 0
     # False only where the court was solved from the video and the solve
     # failed, which makes every figure below it meaningless rather than bad.
@@ -265,7 +265,7 @@ def _score(
     labelled = events[events["clip_id"] == clip_id].set_index("frame")
     found = _landings(shuttle_tracks)
 
-    matches, missed, spurious = match_landings(
+    matches, missed, false_positives = match_landings(
         sorted(found), sorted(labelled.index), window
     )
     counts = detection_counts(sorted(found), sorted(labelled.index), window)
@@ -295,19 +295,19 @@ def _score(
             "detected": counts.detected,
             "matched": counts.matched,
             "missed": counts.missed,
-            "spurious": counts.spurious,
+            "false_positives": counts.false_positives,
             "precision": None
             if counts.precision is None
             else round(counts.precision, 4),
             "recall": None if counts.recall is None else round(counts.recall, 4),
             "f1": None if counts.f1 is None else round(counts.f1, 4),
             "missed_frames": missed,
-            "spurious_frames": spurious,
+            "false_positive_frames": false_positives,
             "frame_error": [m.frame_error for m in matches],
         },
-        position=position_errors(positions),
-        verdict=verdict_counts(verdicts),
-        court=_court_error(court_points, clip_id, court),
+        position_error=position_errors(positions),
+        verdict_correctness=verdict_counts(verdicts),
+        court_error=_court_error(court_points, clip_id, court),
         frames_tracked=frames_tracked,
         court_solved=court is not None,
     )
@@ -346,11 +346,13 @@ def _court_error(court_points: pd.DataFrame, clip_id: str, court) -> dict:
     annotation. It bounds how well any landing can be placed, whoever placed
     the court.
 
-    `solved_cm` is how far the court this run used sits from the annotated one,
-    measured where the annotator put the vertices. It is zero by construction
-    where the court *is* the annotated one, so it only says anything in the
-    configuration that solves its own — which is the configuration whose
-    verdicts can be wrong for reasons the hit detection is not responsible for.
+    `vertex_cm` is how far this run's court places the annotated vertices from
+    where they truly sit on a court, in centimetres. It is not zero even when
+    the court *is* the annotated one: it then measures how precisely the
+    vertices were clicked, which is the floor under every landing position.
+    Where the court was solved it carries the solver's error on top of that
+    floor, so the two configurations read together say how much the solver
+    added.
     """
     clip_points = court_points[
         (court_points["clip_id"] == clip_id) & court_points["visible"]
@@ -393,7 +395,7 @@ def _court_error(court_points: pd.DataFrame, clip_id: str, court) -> dict:
             flipped = bool(np.median(mirrored) < np.median(direct))
             distances = mirrored if flipped else direct
 
-            error["solved_cm"] = {
+            error["vertex_cm"] = {
                 "median": round(float(np.median(distances)), 1),
                 "max": round(float(distances.max()), 1),
             }
@@ -419,17 +421,20 @@ def summarise(results: list[ClipResult]) -> dict:
     """
     matched = sum(result.detection["matched"] for result in results)
     missed = sum(result.detection["missed"] for result in results)
-    spurious = sum(result.detection["spurious"] for result in results)
+    false_positives = sum(result.detection["false_positives"] for result in results)
 
     labelled = matched + missed
-    detected = matched + spurious
+    detected = matched + false_positives
     precision = matched / detected if detected else None
     recall = matched / labelled if labelled else None
     f1 = 2 * precision * recall / (precision + recall) if precision and recall else None
 
-    verdicts = sum(result.verdict["count"] for result in results)
+    verdicts = sum(result.verdict_correctness["count"] for result in results)
     right = sum(
-        round((result.verdict["accuracy"] or 0) * result.verdict["count"])
+        round(
+            (result.verdict_correctness["accuracy"] or 0)
+            * result.verdict_correctness["count"]
+        )
         for result in results
     )
 
@@ -440,23 +445,23 @@ def summarise(results: list[ClipResult]) -> dict:
             "detected": detected,
             "matched": matched,
             "missed": missed,
-            "spurious": spurious,
+            "false_positives": false_positives,
             "precision": None if precision is None else round(precision, 4),
             "recall": None if recall is None else round(recall, 4),
             "f1": None if f1 is None else round(f1, 4),
         },
-        "verdict": {
+        "verdict_correctness": {
             "count": verdicts,
             "accuracy": None if not verdicts else round(right / verdicts, 4),
             "called_in_was_out": sum(
-                result.verdict["called_in_was_out"] for result in results
+                result.verdict_correctness["called_in_was_out"] for result in results
             ),
             "called_out_was_in": sum(
-                result.verdict["called_out_was_in"] for result in results
+                result.verdict_correctness["called_out_was_in"] for result in results
             ),
         },
-        "position": {
-            "count": sum(result.position["count"] for result in results),
+        "position_error": {
+            "count": sum(result.position_error["count"] for result in results),
             "median_cm": _pooled_median(results),
         },
     }
@@ -470,8 +475,8 @@ def _pooled_median(results: list[ClipResult]) -> float | None:
     every error retained, which the record does not carry.
     """
     medians = [
-        result.position["median_cm"]
+        result.position_error["median_cm"]
         for result in results
-        if result.position["median_cm"] is not None
+        if result.position_error["median_cm"] is not None
     ]
     return None if not medians else round(float(np.median(medians)), 1)

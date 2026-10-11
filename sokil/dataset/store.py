@@ -135,6 +135,7 @@ class Dataset:
             court_points = self.read("court_points")
             problems += _schema_problems("court_points", court_points)
             problems += _court_point_problems(clips, court_points)
+            problems += _stale_derivation_problems(clips, events, court_points)
 
         if self.path("tracks").exists():
             tracks = self.read("tracks")
@@ -421,6 +422,74 @@ def _track_problems(
         )
 
     return problems
+
+
+def _stale_derivation_problems(
+    clips: pd.DataFrame, events: pd.DataFrame, court_points: pd.DataFrame
+) -> list[str]:
+    """
+    Catch stale variables in a dataset that are no longer valid.
+    """
+    from .clips import is_empty, observed_camera_mode, observed_court_type
+
+    problems = []
+    placed = set(court_points["clip_id"])
+
+    for clip in clips.itertuples():
+        if clip.clip_id in placed:
+            mode = observed_camera_mode(court_points, clip.clip_id)
+            if (
+                mode is not None
+                and not is_empty(clip.camera_mode)
+                and mode != clip.camera_mode
+            ):
+                problems.append(
+                    f"clips.csv: clip {clip.clip_id!r} says camera_mode "
+                    f"{clip.camera_mode!r}, but its court keypoints say "
+                    f"{mode!r}"
+                )
+
+        court_type = observed_court_type(events, clip.clip_id)
+        if (
+            court_type is not None
+            and not is_empty(clip.court_type)
+            and court_type != clip.court_type
+        ):
+            problems.append(
+                f"clips.csv: clip {clip.clip_id!r} says court_type "
+                f"{clip.court_type!r}, but its landings were called against "
+                f"{court_type!r}"
+            )
+
+    problems += _stale_position_problems(events, court_points)
+    if problems:
+        problems.append("Run 'sokil dataset refresh'.")
+
+    return problems
+
+
+def _stale_position_problems(
+    events: pd.DataFrame, court_points: pd.DataFrame
+) -> list[str]:
+    """
+    Find labeled hits that at the time of annotation didn't have court keypoints,
+    and therefore, their positions couldn't be solved.
+    """
+    placed = set(court_points["clip_id"])
+
+    stale = [
+        schema.event_label(event)
+        for event in events.itertuples()
+        if event.clip_id in placed and not pd.isna(event.x_px) and pd.isna(event.x_m)
+    ]
+    if not stale:
+        return []
+
+    return [
+        f"events.csv: {len(stale)} landing(s) have a click but no position, "
+        f"though their clip has a court: {', '.join(stale[:5])}"
+        + (" ..." if len(stale) > 5 else "")
+    ]
 
 
 def _split_problems(clips: pd.DataFrame, splits: dict[str, list[str]]) -> list[str]:

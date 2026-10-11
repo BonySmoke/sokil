@@ -43,7 +43,7 @@ class DetectionCounts:
 
     matched: int
     missed: int
-    spurious: int
+    false_positives: int
 
     @property
     def labelled(self) -> int:
@@ -51,7 +51,7 @@ class DetectionCounts:
 
     @property
     def detected(self) -> int:
-        return self.matched + self.spurious
+        return self.matched + self.false_positives
 
     @property
     def recall(self) -> float | None:
@@ -103,9 +103,9 @@ def match_landings(
         used_labelled.add(labelled_frame)
 
     missed = sorted(set(labelled) - used_labelled)
-    spurious = sorted(set(detected) - used_detected)
+    false_positives = sorted(set(detected) - used_detected)
 
-    return sorted(matches, key=lambda m: m.labelled_frame), missed, spurious
+    return sorted(matches, key=lambda m: m.labelled_frame), missed, false_positives
 
 
 def detection_counts(
@@ -114,9 +114,9 @@ def detection_counts(
     window: int = MATCH_WINDOW_FRAMES,
 ) -> DetectionCounts:
     """Precision, recall and F1 over one clip's landings."""
-    matches, missed, spurious = match_landings(detected, labelled, window)
+    matches, missed, false_positives = match_landings(detected, labelled, window)
     return DetectionCounts(
-        matched=len(matches), missed=len(missed), spurious=len(spurious)
+        matched=len(matches), missed=len(missed), false_positives=len(false_positives)
     )
 
 

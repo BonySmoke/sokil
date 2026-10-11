@@ -2,7 +2,6 @@
 Building clips.csv from the recordings.
 """
 
-import hashlib
 import logging
 import re
 from pathlib import Path
@@ -13,11 +12,6 @@ import pandas as pd
 from . import schema
 
 logger = logging.getLogger(__name__)
-
-# Read in blocks rather than whole: a clip is bigger than it needs to be in
-# memory just to be summed.
-DIGEST_BLOCK = 1024 * 1024
-
 
 def is_empty(value) -> bool:
     """
@@ -36,14 +30,6 @@ def is_empty(value) -> bool:
     except (TypeError, ValueError):
         # Not a scalar, so it is something rather than nothing.
         return False
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while block := handle.read(DIGEST_BLOCK):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def session_id(clip_id: str) -> str | None:
@@ -213,7 +199,6 @@ def clip_rows(
 
         row["clip_id"] = clip_id
         row.update(probe(video_path))
-        row["source_sha256"] = sha256(video_path)
 
         if is_empty(row.get("session_id")):
             row["session_id"] = session_id(clip_id)

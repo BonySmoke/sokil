@@ -48,10 +48,7 @@ def image_to_court(court_points: pd.DataFrame, clip_id: str, frame: int):
         return None
 
     visible = keyframe[keyframe["visible"]]
-    # The same fit the evaluation places its court with. Fitting one direction
-    # and inverting the other gives answers that differ by centimetres — which
-    # is the unit the landings are measured in, so the two would disagree about
-    # the very thing they are there to measure.
+
     matrix = image_to_court_homography(
         list(visible["vertex"]), visible[["x_px", "y_px"]].to_numpy()
     )
@@ -121,3 +118,48 @@ def derive_line(x_m: float, y_m: float, court_type: str) -> str:
     to_base = min(abs(y_m - y_min), abs(y_m - y_max))
 
     return Line.SIDELINE.value if to_side <= to_base else Line.BASELINE.value
+
+
+def derive_positions(
+    events: pd.DataFrame, court_points: pd.DataFrame
+) -> tuple[pd.DataFrame, int]:
+    """
+    Recompute every landing's court position from the current keypoints.
+
+    :returns: the events with positions refreshed, and how many rows changed.
+    """
+    events = events.copy()
+    changed = 0
+
+    for clip_id in sorted(events["clip_id"].unique()):
+        to_court = image_to_court(court_points, clip_id, 0)
+        if to_court is None:
+            continue
+
+        for index in events.index[events["clip_id"] == clip_id]:
+            x_px, y_px = events.at[index, "x_px"], events.at[index, "y_px"]
+            if pd.isna(x_px) or pd.isna(y_px):
+                continue
+
+            placed = to_court(float(x_px), float(y_px))
+            if placed is None:
+                continue
+
+            x_m, y_m = round(placed[0], 4), round(placed[1], 4)
+            court_type = events.at[index, "court_type"]
+            line = (
+                None
+                if pd.isna(court_type)
+                else derive_line(placed[0], placed[1], court_type)
+            )
+
+            was = (events.at[index, "x_m"], events.at[index, "y_m"])
+            if pd.isna(was[0]) or was != (x_m, y_m):
+                changed += 1
+
+            events.at[index, "x_m"] = x_m
+            events.at[index, "y_m"] = y_m
+            events.at[index, "line"] = line
+
+    logger.info("Re-derived %d landing position(s)", changed)
+    return events, changed

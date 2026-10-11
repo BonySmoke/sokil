@@ -40,7 +40,10 @@ def _clip_id(name: str, fallback: str) -> str:
     stem = Path(name).stem
     if _frame_index(stem) is not None:
         prefix = stem.rsplit("_", 1)[0]
-        if prefix:
+        # "frame" is what a bare frame_000123.jpg leaves behind, and it names
+        # no clip: every task would claim the same one. Those are the names
+        # the fallback exists for.
+        if prefix and prefix != "frame":
             return prefix
 
     return fallback
@@ -109,6 +112,34 @@ def _parse_cvat_images_xml(xml_path: Path, label_name: str) -> list[dict]:
                     "objects": objects,
                 }
             )
+
+    return samples
+
+
+def _identify(
+    samples: list[dict],
+    task_name: str,
+    task_id: int,
+    images_by_path: dict[str, Path],
+    images_by_stem: dict[str, Path],
+) -> list[dict]:
+    """
+    Give every sample its metadata such as clip ID, task ID, etc.
+    """
+    for sample in samples:
+        name = sample["name"]
+        stem = Path(name).stem
+        clip_id = _clip_id(name, task_name)
+
+        sample["clip_id"] = clip_id
+        sample["task_id"] = task_id
+        sample["image_path"] = _find_image(name, images_by_path, images_by_stem)
+
+        # Handle an edge case when the video was not uploaded to CVAT but mounted from the local filesystem
+        match = re.fullmatch(r"frame_(\d+)", stem)
+        if match:
+            stem = f"{clip_id}_{match.group(1)}"
+        sample["name"] = f"{stem}.jpg"
 
     return samples
 
@@ -188,7 +219,58 @@ def _partition_count(size: float, total: int, name: str) -> int:
     return min(count, total)
 
 
-def _split_by_subset(samples: list, subsets: dict[str, str]) -> dict[str, list]:
+def _cap_by_spread(samples: list, size: float, name: str) -> list:
+    """
+    Thin a partition to `size` frames, spread as widely across each clip as
+    they go.
+
+    Validating on three thousand frames of one rally is not three thousand
+    pieces of evidence: consecutive frames are near-identical, so the figure
+    looks precise while resting on very little. Frames are therefore kept at an
+    even stride rather than taken from the front, and each clip keeps a share
+    proportional to its length so one long clip cannot crowd the others out.
+
+    Sizes read as in _partition_count, but of this partition rather than of the
+    whole export: the subsets have already decided what is in it.
+    """
+    if size <= 0 or not samples:
+        return samples
+
+    target = _partition_count(size, len(samples), name)
+    if target >= len(samples):
+        return samples
+
+    by_clip = defaultdict(list)
+    for sample in samples:
+        by_clip[sample["clip_id"]].append(sample)
+
+    kept = []
+    for clip_id in sorted(by_clip):
+        clip_samples = sorted(
+            by_clip[clip_id], key=lambda sample: _frame_index(sample["name"]) or 0
+        )
+        quota = max(1, round(target * len(clip_samples) / len(samples)))
+        quota = min(quota, len(clip_samples))
+
+        stride = len(clip_samples) / quota
+        kept += [clip_samples[int(index * stride)] for index in range(quota)]
+
+    logger.info(
+        "%s: thinned %d frames to %d, spread across %d clip(s)",
+        name,
+        len(samples),
+        len(kept),
+        len(by_clip),
+    )
+    return kept
+
+
+def _split_by_subset(
+    samples: list,
+    subsets: dict[str, str],
+    valid_size: float = 0.0,
+    test_size: float = 0.0,
+) -> dict[str, list]:
     """
     Assign whole clips by the subset their CVAT task declares.
 
@@ -237,6 +319,10 @@ def _split_by_subset(samples: list, subsets: dict[str, str]) -> dict[str, list]:
         raise SplitError(
             "No clip is in the Train subset, so there is nothing to train on"
         )
+
+    # The subsets say which clips; these say how much of them to measure on.
+    splits["valid"] = _cap_by_spread(splits["valid"], valid_size, "valid")
+    splits["test"] = _cap_by_spread(splits["test"], test_size, "test")
 
     for name, partition in splits.items():
         clips = sorted({sample["clip_id"] for sample in partition})
@@ -382,8 +468,6 @@ def export_dataset(
             )
 
             annotated = len(task_samples)
-            if min_frame_gap > 1:
-                task_samples = _thin_by_frame_gap(task_samples, min_frame_gap)
 
             # Match on the stem: tasks created from mounted frame folders list
             # extension-less names in the XML while the images export as .PNG.
@@ -398,24 +482,19 @@ def export_dataset(
             images_by_path = {
                 str(p.relative_to(extract_dir).with_suffix("")): p for p in images
             }
-            safe_task_name = re.sub(r"[^\w.-]+", "_", task.name)
 
-            for sample in task_samples:
-                name = sample["name"]
-                stem = Path(name).stem
-                clip_id = _clip_id(name, safe_task_name)
-                sample["clip_id"] = clip_id
-                sample["task_id"] = task_id
-                sample["image_path"] = _find_image(name, images_by_path, images_by_stem)
+            _identify(
+                task_samples,
+                re.sub(r"[^\w.-]+", "_", task.name),
+                task_id,
+                images_by_path,
+                images_by_stem,
+            )
 
-                # Tasks created directly from videos or mounted frame folders
-                # (before frames were uploaded individually) export generic
-                # frame_<idx> names; prefix them with the clip so frames from
-                # different clips don't collide and map back to their source.
-                match = re.fullmatch(r"frame_(\d+)", stem)
-                if match:
-                    stem = f"{clip_id}_{match.group(1)}"
-                sample["name"] = f"{stem}.jpg"
+            # Thinning groups by clip, so it has to follow identification: a
+            # sample does not know which clip it belongs to until then.
+            if min_frame_gap > 1:
+                task_samples = _thin_by_frame_gap(task_samples, min_frame_gap)
 
             logger.info(
                 "Task %d: %d annotated frames, %d kept",
@@ -440,7 +519,9 @@ def export_dataset(
                     if sample["task_id"] == task_id
                 }:
                     subsets[clip_id] = getattr(task, "subset", "") or ""
-            splits = _split_by_subset(samples, subsets)
+            splits = _split_by_subset(
+                samples, subsets, valid_size=valid_size, test_size=test_size
+            )
 
         for partition, partition_samples in splits.items():
             images_dir = dataset_dir / "images" / partition
