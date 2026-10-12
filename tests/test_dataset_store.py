@@ -142,7 +142,7 @@ class TestSchemaChecks:
     def test_rejects_a_local_absolute_path_as_a_source(self, tmp_path):
         # An absolute path resolves on the machine that wrote it and nowhere
         # else, so the schema refuses it outright.
-        dataset = build(tmp_path, [clip_row(source_uri="/Users/oleh/videos/a.mp4")], [])
+        dataset = build(tmp_path, [clip_row(source_uri="/Users/user/videos/a.mp4")], [])
 
         assert any("source_uri" in problem for problem in dataset.validate())
 
