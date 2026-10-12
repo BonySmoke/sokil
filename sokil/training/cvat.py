@@ -8,6 +8,7 @@ CVAT_USERNAME, CVAT_PASSWORD.
 import logging
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -15,9 +16,13 @@ import numpy as np
 from dotenv import load_dotenv
 
 from .config import MODEL_SPECS, ModelKind
-from .frames import extract_frames, load_undistorter
+from .frames import extract_court_frame, extract_frames, load_undistorter
 
 logger = logging.getLogger(__name__)
+
+# Where the generated skeleton definition is written when a project needs
+# creating by hand.
+SKELETON_LABEL_PATH = Path("court-skeleton-label.json")
 
 load_dotenv()
 
@@ -37,6 +42,157 @@ def make_cvat_client():
     return make_client(host=url, credentials=(username, password))
 
 
+class CvatSession:
+    """
+    CVAT Session
+    """
+
+    def __init__(self, client):
+        self.client = client
+
+    @classmethod
+    @contextmanager
+    def open(cls):
+        """A session over a client of its own, closed when the block ends."""
+        with make_cvat_client() as client:
+            yield cls(client)
+
+    def project(self, name: str):
+        return find_project(self.client, name)
+
+    def tasks(self, project_name: str, task_ids: list[int] | None = None) -> list:
+        """
+        The project's tasks, in id order, narrowed to task_ids when given.
+
+        Ordered so that two runs over the same project import in the same
+        order, which is what makes a rebuilt table compare cleanly against the
+        one before it.
+        """
+        tasks = list(self.client.tasks.list(project_id=self.project(project_name).id))
+        if task_ids is not None:
+            wanted = set(task_ids)
+            tasks = [task for task in tasks if task.id in wanted]
+
+        return sorted(tasks, key=lambda task: task.id)
+
+    def completed(self, task) -> bool:
+        """
+        Whether every annotation job on a task is marked done.
+
+        Ground truth jobs are ignored: they are a review mechanism, not part of
+        the annotation being waited on.
+        """
+        jobs = [
+            job for job in task.get_jobs() if _enum_value(job.type) != "ground_truth"
+        ]
+        return bool(jobs) and all(_enum_value(job.state) == "completed" for job in jobs)
+
+    def sublabel_names(self, project_name: str) -> dict[int, str]:
+        """Every skeleton sublabel id in the project, to its name."""
+        labels = self.project(project_name).get_labels()
+        skeletons = [label for label in labels if getattr(label, "sublabels", None)]
+        if not skeletons:
+            raise ValueError(
+                f"CVAT project {project_name!r} has no skeleton label to read "
+                f"court vertices from"
+            )
+
+        return {
+            sublabel.id: sublabel.name
+            for label in skeletons
+            for sublabel in label.sublabels
+        }
+
+
+def court_skeleton_svg(sublabel_ids: dict[int, int] | None = None) -> str:
+    """
+    The drawing CVAT shows a skeleton's nodes on, laid out as the court is.
+
+    :param sublabel_ids: vertex number -> the sublabel id CVAT assigned it.
+        A node's data-label-id has to be that id, not the vertex number, or the
+        editor cannot tell which node it is moving. The ids only exist once the
+        CVAT never remaps these itself, so they have to be right in the
+        definition it is given (see court_skeleton_label).
+    """
+    from ..court import CourtModel
+
+    court = CourtModel()
+    vertices = court.vertices
+    sublabel_ids = sublabel_ids or {}
+
+    # The drawing is only the picture an annotator picks nodes from, so it just
+    # has to keep the court's proportions inside CVAT's 0-100 box. Y is flipped:
+    # the court's origin is a baseline, and SVG's is the top.
+    margin = 6.0
+    span = 100.0 - 2 * margin
+    scale = min(span / court.width, span / court.length)
+    offset_x = (100.0 - court.width * scale) / 2
+    offset_y = (100.0 - court.length * scale) / 2
+
+    def place(vertex: tuple[float, float]) -> tuple[float, float]:
+        x, y = vertex
+        return offset_x + x * scale, 100.0 - (offset_y + y * scale)
+
+    lines = []
+    for start, end in court.edges:
+        x1, y1 = place(vertices[start - 1])
+        x2, y2 = place(vertices[end - 1])
+        lines.append(
+            f'<line x1="{x1:.4f}" y1="{y1:.4f}" x2="{x2:.4f}" y2="{y2:.4f}" '
+            f'data-type="edge" data-node-from="{start}" '
+            f'data-node-to="{end}"></line>'
+        )
+
+    circles = []
+    for number, vertex in enumerate(vertices, start=1):
+        x, y = place(vertex)
+        circles.append(
+            f'<circle r="0.75" cx="{x:.4f}" cy="{y:.4f}" '
+            f'data-type="element node" data-element-id="{number}" '
+            f'data-node-id="{number}" '
+            f'data-label-id="{sublabel_ids.get(number, number)}"></circle>'
+        )
+
+    return "\n".join(lines + circles)
+
+
+def court_skeleton_label(label_name: str) -> list[dict]:
+    """
+    The skeleton label definition, in the shape CVAT's raw label editor takes.
+    Generated from court model.
+    """
+    from ..court import CourtModel
+
+    count = len(CourtModel().vertices)
+    return [
+        {
+            "name": label_name,
+            "type": "skeleton",
+            "attributes": [],
+            "sublabels": [
+                {
+                    "name": str(number),
+                    "id": number,
+                    "type": "points",
+                    "attributes": [],
+                }
+                for number in range(1, count + 1)
+            ],
+            "svg": court_skeleton_svg({n: n for n in range(1, count + 1)}),
+        }
+    ]
+
+
+def write_court_skeleton_label(path: Path, label_name: str) -> Path:
+    """Write the skeleton definition for importing into CVAT by hand."""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(court_skeleton_label(label_name), indent=2))
+    logger.info("Wrote the court skeleton label -> %s", path)
+    return path
+
+
 def get_or_create_project(client, name: str, label_name: str, label_type: str):
     """Find a CVAT project by exact name, creating it if it doesn't exist."""
     from cvat_sdk import models
@@ -44,6 +200,16 @@ def get_or_create_project(client, name: str, label_name: str, label_type: str):
     for project in client.projects.list(name=name):
         if project.name == name:
             return project
+
+    if label_type == "skeleton":
+        # A skeleton cannot be built over the API. Therefore, we write the court SVG to a file
+        path = write_court_skeleton_label(SKELETON_LABEL_PATH, label_name)
+        raise ValueError(
+            f"CVAT project {name!r} does not exist, and a skeleton project has "
+            f"to be created by hand: CVAT only binds skeleton nodes correctly "
+            f"through its own label editor. Create the project in CVAT, then "
+            f"paste {path} into Labels > Raw."
+        )
 
     project = client.projects.create(
         models.ProjectWriteRequest(
@@ -153,6 +319,7 @@ def create_cvat_task(
     camera_dist_path: str | None = None,
     pre_annotate_model_path: str | None = None,
     project_name: str | None = None,
+    median_frame: bool = True,
 ) -> int:
     """
     Extract frames from the video and create a CVAT task for them inside the
@@ -164,9 +331,16 @@ def create_cvat_task(
     undistorter = load_undistorter(camera_intrinsics_path, camera_dist_path)
 
     with tempfile.TemporaryDirectory() as staging:
-        frame_paths = extract_frames(
-            video_path, Path(staging), every_n_frames, undistorter
-        )
+        if kind == ModelKind.COURT_KEYPOINTS:
+            frame_paths = [
+                extract_court_frame(
+                    video_path, Path(staging), undistorter, median=median_frame
+                )
+            ]
+        else:
+            frame_paths = extract_frames(
+                video_path, Path(staging), every_n_frames, undistorter
+            )
 
         if not frame_paths:
             raise ValueError(f"No frames extracted from {video_path}")
@@ -197,7 +371,12 @@ def create_cvat_task(
                 project.name,
             )
 
-            if pre_annotate_model_path:
+            if pre_annotate_model_path and kind == ModelKind.COURT_KEYPOINTS:
+                logger.warning(
+                    "Pre-annotating court keypoints is not supported yet; "
+                    "the task was created empty"
+                )
+            elif pre_annotate_model_path:
                 labels = task.get_labels()
                 label_id = next(
                     (label.id for label in labels if label.name == spec.label),

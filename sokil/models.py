@@ -62,13 +62,18 @@ class ShuttleDetector(Model):
     task = "detect"
 
     def best_box(
-        self, image: np.ndarray, confidence: float | None = None
+        self,
+        image: np.ndarray,
+        confidence: float | None = None,
+        frame: int | None = None,
     ) -> tuple[tuple[float, float, float, float], float] | None:
         """
         The highest-confidence box as (xyxy, confidence), or None.
 
         The pipeline follows one shuttle, so it wants the most confident box
         rather than whichever came first: box order is a post-processing detail.
+
+        :param frame: frame ID. Used for getting ground truth labels during validation.
         """
         result = self.predict(image, confidence)
 

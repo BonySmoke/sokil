@@ -18,3 +18,5 @@ weights
 .pytest_cache
 .coverage
 .ruff_cache
+evaluations
+dataset

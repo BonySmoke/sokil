@@ -45,3 +45,16 @@ models:
     weights: training/yolo11s-seg.pt
     imgsz: 640
     batch: 16
+
+  court_keypoints:
+    project: Badminton Court Keypoints
+    label: court dimensions
+    label_type: skeleton
+
+    # Clicked against the painted lines, so the colour they were painted in is
+    # part of what makes them findable.
+    grayscale: false
+
+    weights: training/yolo11n-pose.pt
+    imgsz: 640
+    batch: 16

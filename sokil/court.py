@@ -30,6 +30,39 @@ from .util import (
 
 logger = logging.getLogger(__name__)
 
+# How far apart, in image pixels, the two baselines must sit before which of
+# them faces the camera can be read off the frame at all.
+MIN_END_SEPARATION_PX = 5.0
+
+
+# A homography needs four points, and four fit one exactly: with no spare, a
+# mistaken point produces a perfect fit through the wrong court.
+MIN_POINTS_FOR_HOMOGRAPHY = 4
+
+
+def vertex_coordinates(vertices: list[int]) -> np.ndarray:
+    """Where each 1-based court vertex sits on the court, in centimetres."""
+    model = CourtModel().vertices
+    return np.array([model[number - 1] for number in vertices], dtype=np.float64)
+
+
+def homography_from_vertices(vertices: list[int], pixels) -> np.ndarray | None:
+    """
+    The image->court homography a set of located vertices implies, or None.
+
+    ViewTransformer holds image->court, so this is the direction the pipeline
+    wants. Plain least squares rather than RANSAC: these points are named one
+    by one, so a stray one is a mistake to surface, not noise to discard.
+    """
+    if len(vertices) < MIN_POINTS_FOR_HOMOGRAPHY:
+        return None
+
+    source = np.asarray(pixels, dtype=np.float32)
+    target = vertex_coordinates(vertices).astype(np.float32)
+
+    matrix, _ = cv2.findHomography(source, target, 0)
+    return matrix
+
 
 class CourtCameraMode(Enum):
     FULL = "full"
@@ -147,6 +180,34 @@ class Court:
             court_camera_mode=self.court_config.court_camera_mode,
             court_model_type=self.court_config.court_model_type,
         )
+
+    @classmethod
+    def from_points(
+        cls,
+        vertices: list[int],
+        pixels,
+        court_config: "CourtConfig | None" = None,
+        image=None,
+    ) -> "Court":
+        """
+        A court placed by naming where its own vertices are in the image.
+
+        :param vertices: CourtModel vertex numbers, 1-based.
+        :param pixels: where each of those vertices sits, in image pixels.
+
+        The homography is fitted image->court directly rather than fitted the
+        other way and inverted, so a near-singular fit fails here instead of
+        producing a matrix that inverts badly.
+
+        :returns: the court, or None where the points cannot place one — fewer
+            than four, or an arrangement a homography cannot be fitted to, such
+            as vertices that all lie on one line.
+        """
+        matrix = homography_from_vertices(vertices, pixels)
+        if matrix is None:
+            return None
+
+        return cls.from_homography(matrix, court_config=court_config, image=image)
 
     @classmethod
     def from_homography(
@@ -330,7 +391,7 @@ class Court:
         # try every order-preserving assignment and keep the one whose
         # homography best matches the segmentation mask.
         best_transformer = None
-        best_iou = -1.0
+        best_key = (-1, -1.0)
         for matches in candidates:
             source_pts, target_pts = correspondences_from_matches(matches)
             if len(source_pts) < 4:
@@ -342,13 +403,55 @@ class Court:
                 continue
 
             scored = self._transformer_score(transformer, source_pts, target_pts)
-            if scored is not None and scored[1] > best_iou:
-                best_transformer, best_iou = transformer, scored[1]
+            if scored is None:
+                continue
+
+            key = (int(self._origin_nearest_to_the_camera(transformer)), scored[1])
+            if key > best_key:
+                best_transformer, best_key = transformer, key
 
         if best_transformer is not None:
-            self.homography_iou = best_iou
+            self.homography_iou = best_key[1]
+            if not self._origin_nearest_to_the_camera(best_transformer):
+                logger.warning(
+                    "Every candidate court places the far baseline nearest the "
+                    "camera; reported positions will be mirrored along the "
+                    "court's length"
+                )
 
         return best_transformer
+
+    def _origin_nearest_to_the_camera(self, transformer: "ViewTransformer") -> bool:
+        """
+        Whether the court baseline is nearest to the camera.
+
+        True when the two ends cannot be told apart — a camera level with the
+        court, or looking down its length, flattens the difference — because an
+        undecidable court should be left where the mask put it rather than
+        turned round on noise.
+        """
+        model = self.court_model
+        ends = np.array(
+            [[model.width / 2, 0.0], [model.width / 2, model.length]],
+            dtype=np.float32,
+        )
+
+        try:
+            projected = transformer.inverse_transform_points(ends)
+        except cv2.error:
+            return True
+
+        if projected is None or len(projected) != 2 or not np.isfinite(projected).all():
+            return True
+
+        near_end_y, far_end_y = float(projected[0][1]), float(projected[1][1])
+
+        # Below this the two ends are the same height on screen and the test
+        # says nothing; the figure is in pixels of a frame hundreds tall.
+        if abs(near_end_y - far_end_y) < MIN_END_SEPARATION_PX:
+            return True
+
+        return near_end_y > far_end_y
 
     def solve_geometric_homography(self) -> bool:
         """

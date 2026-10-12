@@ -25,9 +25,11 @@ class ScriptedDetector:
         self.imgsz = imgsz
         self.boxes = []
         self.seen = []
+        self.frames = []
 
-    def best_box(self, image, confidence=None):
+    def best_box(self, image, confidence=None, frame=None):
         self.seen.append(image)
+        self.frames.append(frame)
         index = len(self.seen) - 1
         if index >= len(self.boxes) or self.boxes[index] is None:
             return None
@@ -185,3 +187,66 @@ class TestTracking:
 
         assert tracks[0].measured_cork is None
         assert any(track.measured_cork is not None for track in tracks[4:])
+
+
+class TestInjectedDetector:
+    """
+    The tracker asks whatever it was given for a box, and passes the frame
+    number with the image. A model ignores that number; a source that looks a
+    box up needs it, which is the whole reason it travels.
+    """
+
+    class ScriptedBySource:
+        """Answers from a dict keyed by frame, the way ground truth does."""
+
+        def __init__(self, boxes: dict):
+            self.boxes = boxes
+            self.asked = []
+
+        def best_box(self, image, confidence=None, frame=None):
+            self.asked.append(frame)
+            box = self.boxes.get(frame)
+            return None if box is None else (box, 1.0)
+
+    def test_a_given_detector_needs_no_weights(self):
+        source = self.ScriptedBySource({0: (16, 46, 34, 64), 1: (20, 46, 38, 64)})
+
+        tracks = ShuttleTracker(detector=source).track(FakeSource(2))
+
+        assert [track.number for track in tracks] == [0, 1]
+
+    def test_the_frame_number_travels_with_the_image(self):
+        source = self.ScriptedBySource({0: (16, 46, 34, 64)})
+
+        ShuttleTracker(detector=source).track(FakeSource(4))
+
+        assert source.asked == [0, 1, 2, 3]
+
+    def test_a_frame_with_no_box_is_skipped(self):
+        source = self.ScriptedBySource({0: (16, 46, 34, 64), 2: (24, 46, 42, 64)})
+
+        tracks = ShuttleTracker(detector=source).track(FakeSource(3))
+
+        assert [track.number for track in tracks] == [0, 2]
+
+    def test_the_box_reaches_the_track_unchanged(self):
+        source = self.ScriptedBySource({0: (16, 46, 34, 64)})
+
+        tracks = ShuttleTracker(detector=source).track(FakeSource(1))
+
+        assert tracks[0].xyxy == (16, 46, 34, 64)
+
+    def test_everything_downstream_is_still_measured_from_the_pixels(self):
+        source = self.ScriptedBySource(
+            {i: (16 + i * 4, 46, 34 + i * 4, 64) for i in range(6)}
+        )
+
+        tracks = ShuttleTracker(detector=source).track(FakeSource(6))
+
+        assert all(track.blur > 0 for track in tracks)
+        assert any(track.measured_cork is not None for track in tracks)
+        assert tracks[-1].speed > 0
+
+    def test_a_tracker_with_neither_weights_nor_a_detector_says_so(self):
+        with pytest.raises(ValueError, match="detector_kwargs or a detector"):
+            ShuttleTracker()

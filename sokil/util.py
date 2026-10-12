@@ -1055,6 +1055,17 @@ def _family_assignments(detected, expected):
     ascending choice of k detected lines is paired with every ascending choice
     of k expected coords. Larger k comes first — more matched lines pin the
     homography better. At least 2 lines are needed to span a homography grid.
+
+    Each pairing is offered both ways round, because which way a model axis
+    runs across the image is a fact about where the camera stands, not about
+    the court. Seen from the other side of the net, or from the other end, the
+    lines arrive in the opposite order; pairing ascending with ascending only
+    would mean the correct court is never among the candidates, and no amount
+    of scoring can choose what was never offered.
+
+    The two orderings are appended adjacently so that a later sort, which is
+    stable and keys on how many lines a candidate explains, keeps them together
+    rather than letting a cap drop one orientation entirely.
     """
     assignments = []
     largest_size = min(len(detected), len(expected))
@@ -1062,6 +1073,9 @@ def _family_assignments(detected, expected):
         for detected_subset in combinations(detected, size):
             for expected_subset in combinations(expected, size):
                 assignments.append(list(zip(detected_subset, expected_subset)))
+                assignments.append(
+                    list(zip(detected_subset, reversed(expected_subset)))
+                )
     return assignments
 
 

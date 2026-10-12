@@ -21,7 +21,7 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: uv sync --frozen --no-default-groups --group test
+        run: uv sync --frozen --no-default-groups --group test --group dataset
 
       # Headless: matplotlib picks a backend at import, and the runner has no
       # display for it to find.

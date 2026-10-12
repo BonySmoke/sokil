@@ -313,7 +313,23 @@ class TestSolveHomographyFromLines:
     OFFSET_X, OFFSET_Y = 30, 20
 
     def to_image(self, x_cm: float, y_cm: float) -> tuple[float, float]:
-        return (x_cm * self.SCALE + self.OFFSET_X, y_cm * self.SCALE + self.OFFSET_Y)
+        """
+        Court centimetres to image pixels, the way a real camera sees it.
+
+        y is mirrored so that the baseline at y = 0 lands at the bottom of the
+        frame. A camera above the court sees nearer ground lower in the image,
+        and the solver relies on that to tell the two baselines apart — they
+        are otherwise interchangeable, since the court is symmetric about its
+        mid-court line. A projection that put y = 0 at the top would describe a
+        camera underneath the floor.
+        """
+        from sokil.court import CourtModel
+
+        mirrored_y = CourtModel().length - y_cm
+        return (
+            x_cm * self.SCALE + self.OFFSET_X,
+            mirrored_y * self.SCALE + self.OFFSET_Y,
+        )
 
     def build(self, model: CourtModel):
         width = int(model.width * self.SCALE) + 2 * self.OFFSET_X
