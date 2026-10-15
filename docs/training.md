@@ -88,6 +88,40 @@ uv run sokil models pin --tag models-2026-09-06 \
 
 Paste the output into `sokil/models.yaml`, keeping its comments, and commit it.
 
+## 6. Compile for Hailo (optional)
+
+A Hailo accelerator runs its own compiled format, HEF. The compiler, Hailo's
+Dataflow Compiler, runs only on Linux x86_64. It needs no Hailo device, and
+an NVIDIA GPU is optional: without one it optimizes on the CPU, which is
+slower and can cost accuracy.
+
+The compiler is not on a public registry. Sign in to the [Hailo Developer
+Zone](https://hailo.ai/developer-zone/), download the AI Software Suite Docker
+image, and load it:
+
+```bash
+docker load -i hailo8_ai_sw_suite_<version>.tar.gz   # prints the tag it loaded
+make hailo-build HAILO_SUITE_IMAGE=<that tag>
+```
+
+Then compile each model. Calibration uses about 1,024 images from the
+model's `train` split, so export its dataset first (step 2):
+
+```bash
+make hailo-export MODEL=shuttle WEIGHTS=training/shuttle/best.pt
+make hailo-export MODEL=court WEIGHTS=training/court/best.pt
+```
+
+The repository is mounted read-only, so the weights must be inside it. Each
+run writes `training/<model>/hailo/<stem>-hailo8_hailo_model/`, holding the
+`.hef` and the metadata `YOLO()` needs to load it on the device. Pass
+`HAILO_ARCH=hailo8l` to build for a Hailo-8L, and `HAILO_GPUS=` on a machine
+without an NVIDIA GPU.
+
+Before relying on a HEF, compare its detections with the `.pt` weights on the
+`test` split. INT8 quantization can cost recall on a target as small as the
+shuttle.
+
 ## Versioning
 
 `sokil/models.yaml` is the single source of truth for which weights a given

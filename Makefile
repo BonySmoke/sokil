@@ -48,6 +48,27 @@ mounts = -v "$(PWD)":/data -v "$(MODELS_VOLUME)":/cache
 tty_flag = $$([ -t 1 ] && echo -t)
 docker_run = docker run --rm $(tty_flag) $(mounts) --user $(UID):$(GID) $(IMAGE)
 
+# --- Hailo export image ------------------------------------------------------
+# The tag `docker load` printed for the AI Software Suite tarball.
+HAILO_SUITE_IMAGE ?= hailo8_ai_sw_suite_2025-10:1
+HAILO_IMAGE ?= sokil-hailo:dev
+# Only needed when the suite's virtualenv is not first on its PATH; the build
+# says so if it is not.
+HAILO_PYTHON ?= python3
+
+# What to compile, relative to the repo root, which is mounted read-only. The
+# weights must therefore live inside the repo, e.g. under training/.
+MODEL ?=
+WEIGHTS ?=
+HAILO_DATA ?= training/$(MODEL)/datasets/data.yaml
+HAILO_ARCH ?= hailo8
+HAILO_OUT ?= training/$(MODEL)/hailo
+# Set empty on a machine without an NVIDIA GPU: --gpus fails outright without
+# the NVIDIA container toolkit, and the DFC then optimizes on the CPU.
+HAILO_GPUS ?= all
+
+hailo_gpus_flag = $(if $(strip $(HAILO_GPUS)),--gpus $(HAILO_GPUS))
+
 .DEFAULT_GOAL := help
 
 help:  ## Show this help
@@ -80,6 +101,18 @@ review:  ## Run a review in the container, e.g. make review ARGS="--video-path a
 
 shell:  ## Open a shell in the application image
 	docker run --rm -it $(mounts) --user $(UID):$(GID) --entrypoint bash $(IMAGE)
+
+hailo-build:  ## Build the Hailo export image (linux/amd64, needs the suite image loaded)
+	docker buildx build --platform linux/amd64 --load \
+		--build-arg HAILO_SUITE_IMAGE=$(HAILO_SUITE_IMAGE) --build-arg HAILO_PYTHON=$(HAILO_PYTHON) \
+		-t $(HAILO_IMAGE) docker/hailo
+
+hailo-export:  ## Compile weights to a HEF, e.g. make hailo-export MODEL=shuttle WEIGHTS=training/shuttle/best.pt
+	@[ -n "$(MODEL)" ] && [ -n "$(WEIGHTS)" ] || { echo "MODEL and WEIGHTS are required" >&2; exit 1; }
+	mkdir -p "$(HAILO_OUT)"
+	docker run --rm $(tty_flag) $(hailo_gpus_flag) --user $(UID):$(GID) \
+		-v "$(PWD)":/data:ro -v "$(PWD)/$(HAILO_OUT)":/out $(HAILO_IMAGE) \
+		--weights "/data/$(WEIGHTS)" --data "/data/$(HAILO_DATA)" --arch $(HAILO_ARCH)
 
 cvat-env:
 	@./helper.sh cvat-env "$(CVAT_ENV)"
