@@ -115,8 +115,9 @@ make hailo-export MODEL=court WEIGHTS=training/court/best.pt
 The repository is mounted read-only, so the weights must be inside it. Each
 run writes `training/<model>/hailo/<stem>-hailo8_hailo_model/`, holding the
 `.hef` and the metadata `YOLO()` needs to load it on the device. Pass
-`HAILO_ARCH=hailo8l` to build for a Hailo-8L, and `HAILO_GPUS=` on a machine
-without an NVIDIA GPU.
+`HAILO_ARCH=hailo8l` to build for a Hailo-8L. The export uses every NVIDIA GPU
+when the host has `nvidia-smi` and the CPU otherwise; set `HAILO_GPUS` to
+override.
 
 Before relying on a HEF, compare its detections with the `.pt` weights on the
 `test` split. INT8 quantization can cost recall on a target as small as the

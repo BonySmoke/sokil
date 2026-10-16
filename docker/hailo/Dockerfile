@@ -9,7 +9,7 @@
 # Its own context (docker/hailo), rather than the repo root, so a build sends
 # just the export script and not the datasets: those are mounted at run time.
 
-ARG HAILO_SUITE_IMAGE=hailo8_ai_sw_suite_2025-10:1
+ARG HAILO_SUITE_IMAGE=hailo8_ai_sw_suite_2026-07:latest
 
 FROM ${HAILO_SUITE_IMAGE}
 
@@ -28,21 +28,27 @@ RUN "$HAILO_PYTHON" -c "import hailo_sdk_client" \
 # against, and pip would otherwise upgrade shared ones like numpy to whatever
 # ultralytics prefers. A clash fails the build here instead of the export later.
 #
-# Torch is the CPU build: it only loads the .pt and traces the ONNX graph. The
-# GPU work is the DFC's, through the suite's own TensorFlow.
+# Torch, torchvision and onnxruntime come from the suite, which ships them for
+# the DFC; ultralytics only uses torch to load the .pt and trace the ONNX graph.
+# onnxslim is what the ONNX simplify step needs; ultralytics would otherwise
+# pip-install it mid-export.
 #
-# onnxruntime and onnxslim are what the ONNX simplify step needs; ultralytics
-# would otherwise pip-install them mid-export. onnxruntime is left unpinned so
-# pip picks a build for the suite's Python.
-RUN "$HAILO_PYTHON" -m pip list --format=freeze > /tmp/suite-constraints.txt \
+# cloudpickle is the one exception to the pins: ultralytics needs >=3.1.1, the
+# suite has 2.2.0, and only tensordict and tensorflow-probability use it, with
+# no upper bound.
+#
+# The suite fails `pip check` as shipped (the DFC pins versions its own suite
+# does not install), so the check only fails on conflicts this step adds.
+RUN "$HAILO_PYTHON" -m pip list --format=freeze | grep -v '^cloudpickle==' > /tmp/suite-constraints.txt \
+    && { "$HAILO_PYTHON" -m pip check > /tmp/check-before.txt || true; } \
     && "$HAILO_PYTHON" -m pip install --no-cache-dir -c /tmp/suite-constraints.txt \
-        --index-url https://download.pytorch.org/whl/cpu \
-        torch==2.14.0 torchvision==0.29.0 \
-    && "$HAILO_PYTHON" -m pip install --no-cache-dir -c /tmp/suite-constraints.txt \
-        ultralytics==8.4.149 onnxslim==0.1.98 onnxruntime \
-    && "$HAILO_PYTHON" -m pip check \
-    && "$HAILO_PYTHON" -c "import hailo_sdk_client, ultralytics" \
-    && rm /tmp/suite-constraints.txt
+        ultralytics==8.4.149 onnxslim==0.1.98 \
+    && { "$HAILO_PYTHON" -m pip check > /tmp/check-after.txt || true; } \
+    && if grep -vxFf /tmp/check-before.txt /tmp/check-after.txt; then \
+           echo "installing ultralytics broke the dependencies above" >&2; exit 1; \
+       fi \
+    && "$HAILO_PYTHON" -c "import hailo_sdk_client, ultralytics, onnxslim" \
+    && rm /tmp/suite-constraints.txt /tmp/check-before.txt /tmp/check-after.txt
 
 # The container runs under the host's uid (see the Makefile), which has no home
 # here and cannot write the suite user's. ultralytics writes a settings file on

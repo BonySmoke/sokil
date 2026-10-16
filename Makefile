@@ -50,7 +50,7 @@ docker_run = docker run --rm $(tty_flag) $(mounts) --user $(UID):$(GID) $(IMAGE)
 
 # --- Hailo export image ------------------------------------------------------
 # The tag `docker load` printed for the AI Software Suite tarball.
-HAILO_SUITE_IMAGE ?= hailo8_ai_sw_suite_2025-10:1
+HAILO_SUITE_IMAGE ?= hailo8_ai_sw_suite_2026-07:latest
 HAILO_IMAGE ?= sokil-hailo:dev
 # Only needed when the suite's virtualenv is not first on its PATH; the build
 # says so if it is not.
@@ -63,9 +63,12 @@ WEIGHTS ?=
 HAILO_DATA ?= training/$(MODEL)/datasets/data.yaml
 HAILO_ARCH ?= hailo8
 HAILO_OUT ?= training/$(MODEL)/hailo
-# Set empty on a machine without an NVIDIA GPU: --gpus fails outright without
-# the NVIDIA container toolkit, and the DFC then optimizes on the CPU.
-HAILO_GPUS ?= all
+# All GPUs when the host has an NVIDIA driver, none otherwise: --gpus fails
+# outright without the NVIDIA container toolkit, and the DFC then optimizes on
+# the CPU. Override either way, e.g. HAILO_GPUS= or HAILO_GPUS=device=0.
+HAILO_GPUS ?= $(if $(shell command -v nvidia-smi),all)
+# Extra export_hailo.py flags, e.g. HAILO_ARGS="--calibration-images 256".
+HAILO_ARGS ?=
 
 hailo_gpus_flag = $(if $(strip $(HAILO_GPUS)),--gpus $(HAILO_GPUS))
 
@@ -112,7 +115,7 @@ hailo-export:  ## Compile weights to a HEF, e.g. make hailo-export MODEL=shuttle
 	mkdir -p "$(HAILO_OUT)"
 	docker run --rm $(tty_flag) $(hailo_gpus_flag) --user $(UID):$(GID) \
 		-v "$(PWD)":/data:ro -v "$(PWD)/$(HAILO_OUT)":/out $(HAILO_IMAGE) \
-		--weights "/data/$(WEIGHTS)" --data "/data/$(HAILO_DATA)" --arch $(HAILO_ARCH)
+		--weights "/data/$(WEIGHTS)" --data "/data/$(HAILO_DATA)" --arch $(HAILO_ARCH) $(HAILO_ARGS)
 
 cvat-env:
 	@./helper.sh cvat-env "$(CVAT_ENV)"
