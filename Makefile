@@ -28,8 +28,7 @@ PLATFORMS ?= linux/amd64,linux/arm64
 # the release tag to publish to, e.g. make models-release MODELS_TAG=models-2026-09-06
 MODELS_TAG ?=
 
-# Required by models-release, deliberately without defaults: trained weights
-# live wherever the training run left them, which is particular to each machine.
+# Required by models-release, hailo-local and hailo-cloud compile
 SHUTTLE_WEIGHTS ?=
 COURT_WEIGHTS ?=
 
@@ -48,29 +47,10 @@ mounts = -v "$(PWD)":/data -v "$(MODELS_VOLUME)":/cache
 tty_flag = $$([ -t 1 ] && echo -t)
 docker_run = docker run --rm $(tty_flag) $(mounts) --user $(UID):$(GID) $(IMAGE)
 
-# --- Hailo export image ------------------------------------------------------
-# The tag `docker load` printed for the AI Software Suite tarball.
-HAILO_SUITE_IMAGE ?= hailo8_ai_sw_suite_2026-07:latest
-HAILO_IMAGE ?= sokil-hailo:dev
-# Only needed when the suite's virtualenv is not first on its PATH; the build
-# says so if it is not.
-HAILO_PYTHON ?= python3
-
-# What to compile, relative to the repo root, which is mounted read-only. The
-# weights must therefore live inside the repo, e.g. under training/.
-MODEL ?=
-WEIGHTS ?=
-HAILO_DATA ?= training/$(MODEL)/datasets/data.yaml
-HAILO_ARCH ?= hailo8
-HAILO_OUT ?= training/$(MODEL)/hailo
-# All GPUs when the host has an NVIDIA driver, none otherwise: --gpus fails
-# outright without the NVIDIA container toolkit, and the DFC then optimizes on
-# the CPU. Override either way, e.g. HAILO_GPUS= or HAILO_GPUS=device=0.
-HAILO_GPUS ?= $(if $(shell command -v nvidia-smi),all)
-# Extra export_hailo.py flags, e.g. HAILO_ARGS="--calibration-images 256".
-HAILO_ARGS ?=
-
-hailo_gpus_flag = $(if $(strip $(HAILO_GPUS)),--gpus $(HAILO_GPUS))
+# review-hailo: the published Hailo image by default, as a Pi has nothing built
+# locally. Its HailoRT must match the host's; see docker/hailo/README.md.
+HAILO_REVIEW_IMAGE ?= ghcr.io/bonysmoke/sokil:latest-hailo
+HAILO_DEVICE ?= /dev/hailo0
 
 .DEFAULT_GOAL := help
 
@@ -94,28 +74,19 @@ test-unit:  ## Run the unit tests with coverage, as CI does
 	uv run pytest --cov --cov-report=term-missing
 
 build:  ## Build the application image for this machine
-	docker buildx build -t $(IMAGE) .
+	docker buildx build -f docker/cpu/Dockerfile -t $(IMAGE) .
 
 build-multi-arch:  ## Build a multi-arch image
-	docker buildx build --platform $(PLATFORMS) -t $(IMAGE) .
+	docker buildx build -f docker/cpu/Dockerfile --platform $(PLATFORMS) -t $(IMAGE) .
 
 review:  ## Run a review in the container, e.g. make review ARGS="--video-path a.mp4 --output-path b.mp4"
 	$(docker_run) review $(ARGS)
 
+review-hailo:  ## Run a review on a Hailo accelerator, e.g. make review-hailo ARGS="--video-path a.mp4 --output-path b.mp4 …"
+	docker run --rm $(tty_flag) --device $(HAILO_DEVICE) $(mounts) --user $(UID):$(GID) $(HAILO_REVIEW_IMAGE) review $(ARGS)
+
 shell:  ## Open a shell in the application image
 	docker run --rm -it $(mounts) --user $(UID):$(GID) --entrypoint bash $(IMAGE)
-
-hailo-build:  ## Build the Hailo export image (linux/amd64, needs the suite image loaded)
-	docker buildx build --platform linux/amd64 --load \
-		--build-arg HAILO_SUITE_IMAGE=$(HAILO_SUITE_IMAGE) --build-arg HAILO_PYTHON=$(HAILO_PYTHON) \
-		-t $(HAILO_IMAGE) docker/hailo
-
-hailo-export:  ## Compile weights to a HEF, e.g. make hailo-export MODEL=shuttle WEIGHTS=training/shuttle/best.pt
-	@[ -n "$(MODEL)" ] && [ -n "$(WEIGHTS)" ] || { echo "MODEL and WEIGHTS are required" >&2; exit 1; }
-	mkdir -p "$(HAILO_OUT)"
-	docker run --rm $(tty_flag) $(hailo_gpus_flag) --user $(UID):$(GID) \
-		-v "$(PWD)":/data:ro -v "$(PWD)/$(HAILO_OUT)":/out $(HAILO_IMAGE) \
-		--weights "/data/$(WEIGHTS)" --data "/data/$(HAILO_DATA)" --arch $(HAILO_ARCH) $(HAILO_ARGS)
 
 cvat-env:
 	@./helper.sh cvat-env "$(CVAT_ENV)"
@@ -138,3 +109,5 @@ cvat-pull: cvat-env  ## Pull the images for the pinned CVAT_VERSION
 
 cvat-superuser: cvat-env  ## Create the admin user
 	$(cvat) exec cvat_server bash -ic 'python3 ~/manage.py createsuperuser'
+
+include infra/hailo/hailo.mk

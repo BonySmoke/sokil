@@ -1,69 +1,82 @@
-# Compiles YOLO weights to Hailo HEF. linux/amd64 only: the Dataflow Compiler
-# ships no other build.
-#
-# The base is Hailo's AI Software Suite, which bundles the DFC with the CUDA and
-# cuDNN it was built against. It is not on a public registry: download the
-# tarball from the Hailo Developer Zone, `docker load` it, and pass the tag it
-# loads as HAILO_SUITE_IMAGE. See docs/training.md.
-#
-# Its own context (docker/hailo), rather than the repo root, so a build sends
-# just the export script and not the datasets: those are mounted at run time.
+# syntax=docker/dockerfile:1
 
-ARG HAILO_SUITE_IMAGE=hailo8_ai_sw_suite_2026-07:latest
+# The CLI with HailoRT, for a Raspberry Pi with a Hailo accelerator. linux/arm64
+# only. Build from the repo root; see README.md here for why it is built this
+# way and how to match the host's HailoRT.
 
-FROM ${HAILO_SUITE_IMAGE}
+FROM debian:trixie-slim AS base
 
-# The interpreter that can import the DFC. The suite installs it in a virtualenv;
-# if that is not first on PATH, the check below fails and names this argument.
-ARG HAILO_PYTHON=python3
-ENV HAILO_PYTHON=${HAILO_PYTHON}
+ARG HAILORT_VERSION=4.23.0
+ARG PYHAILORT_VERSION=4.23.0-1
 
-RUN "$HAILO_PYTHON" -c "import hailo_sdk_client" \
-    || { echo "HAILO_PYTHON=$HAILO_PYTHON cannot import hailo_sdk_client;" \
-              "pass --build-arg HAILO_PYTHON=<the suite virtualenv's python>" >&2; exit 1; }
+# Raspberry Pi's apt repository, its key, and the pins that take only HailoRT
+# from it.
+COPY docker/hailo/rootfs/ /
 
-# The ultralytics exporter drives the DFC from the same process, so both have to
-# be importable from one interpreter. Everything already installed is pinned as
-# a constraint: the suite's packages are the versions the DFC was validated
-# against, and pip would otherwise upgrade shared ones like numpy to whatever
-# ultralytics prefers. A clash fails the build here instead of the export later.
-#
-# Torch, torchvision and onnxruntime come from the suite, which ships them for
-# the DFC; ultralytics only uses torch to load the .pt and trace the ONNX graph.
-# onnxslim is what the ONNX simplify step needs; ultralytics would otherwise
-# pip-install it mid-export.
-#
-# cloudpickle is the one exception to the pins: ultralytics needs >=3.1.1, the
-# suite has 2.2.0, and only tensordict and tensorflow-probability use it, with
-# no upper bound.
-#
-# The suite fails `pip check` as shipped (the DFC pins versions its own suite
-# does not install), so the check only fails on conflicts this step adds.
-RUN "$HAILO_PYTHON" -m pip list --format=freeze | grep -v '^cloudpickle==' > /tmp/suite-constraints.txt \
-    && { "$HAILO_PYTHON" -m pip check > /tmp/check-before.txt || true; } \
-    && "$HAILO_PYTHON" -m pip install --no-cache-dir -c /tmp/suite-constraints.txt \
-        ultralytics==8.4.149 onnxslim==0.1.98 \
-    && { "$HAILO_PYTHON" -m pip check > /tmp/check-after.txt || true; } \
-    && if grep -vxFf /tmp/check-before.txt /tmp/check-after.txt; then \
-           echo "installing ultralytics broke the dependencies above" >&2; exit 1; \
-       fi \
-    && "$HAILO_PYTHON" -c "import hailo_sdk_client, ultralytics, onnxslim" \
-    && rm /tmp/suite-constraints.txt /tmp/check-before.txt /tmp/check-after.txt
+# opencv-python links against the system GL and glib even when it never opens a
+# window; the t64 suffix is trixie's name for glib.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        "hailort=${HAILORT_VERSION}" \
+        "python3-hailort=${PYHAILORT_VERSION}" \
+        libgl1 libglib2.0-0t64 \
+    && rm -rf /var/lib/apt/lists/*
 
-# The container runs under the host's uid (see the Makefile), which has no home
-# here and cannot write the suite user's. ultralytics writes a settings file on
-# import; the DFC keeps its logs in the working directory, which is the output.
-ENV HOME=/tmp/home \
+
+FROM base AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /app
+
+# Debian's Python, so the venv sees hailo_platform in its dist-packages.
+RUN uv venv --system-site-packages --python /usr/bin/python3 /opt/venv
+
+# Dependencies first, without the project, so a source change keeps them cached.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-default-groups --no-install-project
+
+# --no-editable copies the project into the venv, as /app is not in the runtime.
+COPY sokil/ /app/sokil/
+COPY pyproject.toml uv.lock README.md /app/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-default-groups --no-editable
+
+
+FROM base AS runtime
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    SOKIL_CACHE_DIR=/cache \
     YOLO_CONFIG_DIR=/tmp/ultralytics \
-    YOLO_AUTOINSTALL=false \
-    PYTHONUNBUFFERED=1
+    MPLCONFIGDIR=/tmp/matplotlib
 
-COPY export_hailo.py /opt/sokil/export_hailo.py
+# ultralytics and matplotlib write a config on import, and /cache holds the
+# downloaded weights (mount a volume to keep them). All world-writable, as the
+# image runs under whatever --user the host passes.
+RUN useradd --create-home --uid 1000 sokil \
+    && mkdir -p /tmp/ultralytics /tmp/matplotlib /cache /data \
+    && chmod 1777 /tmp/ultralytics /tmp/matplotlib /cache \
+    && chown sokil:sokil /data
 
-# Mount points: the repo read-only at /data, the results at /out.
-WORKDIR /out
+COPY --from=builder /opt/venv /opt/venv
 
-# Through a shell so the interpreter can come from HAILO_PYTHON; the trailing
-# "--" becomes $0, leaving the docker run arguments as "$@".
-ENTRYPOINT ["/bin/sh", "-c", "mkdir -p \"$HOME\" \"$YOLO_CONFIG_DIR\" && exec \"$HAILO_PYTHON\" /opt/sokil/export_hailo.py \"$@\"", "--"]
+# Needs no device, so a build on any arm64 machine checks that the project, the
+# venv's packages and Debian's HailoRT load together.
+RUN python -c "import sokil, hailo_platform, numpy; print('hailo_platform with numpy', numpy.__version__)"
+
+# Bind-mount the working directory here, so relative paths on the command line
+# resolve against the host directory the user ran from.
+WORKDIR /data
+USER sokil
+
+ENTRYPOINT ["sokil"]
 CMD ["--help"]

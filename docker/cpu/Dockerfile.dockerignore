@@ -1,3 +1,6 @@
+# BuildKit reads this, rather than a root .dockerignore, for docker/cpu/Dockerfile;
+# the context is still the repo root.
+#
 # Deny-all, then allow just what the image needs. The repo carries several GB of
 # videos, datasets and training runs; an allow-list keeps them out of the build
 # context by default instead of relying on remembering to exclude each one.

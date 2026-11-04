@@ -11,17 +11,36 @@ permissions:
 
 jobs:
   image:
-    # Trained weights are published as releases too, tagged models-*. Those
-    # publish no code and must not rebuild the application image.
+    # Trained weights are published as releases too, tagged models-*.
+    # Those publish no code and must not rebuild the application images.
     if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.release.tag_name, 'models-') }}
-    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # arm64 is built under emulation, which is slow for this image but
+          # needs no extra runner.
+          - variant: cpu
+            runner: ubuntu-latest
+            platforms: linux/amd64,linux/arm64
+            emulate: true
+            suffix: ""
+          # arm64 only, so it builds natively, and with the HailoRT version in
+          # docker/hailo/Dockerfile: the Pi's driver and firmware must match it.
+          - variant: hailo
+            runner: ubuntu-24.04-arm
+            platforms: linux/arm64
+            emulate: false
+            suffix: -hailo
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v7
 
-      # arm64 is built under emulation, which is slow for this image but needs
-      # no self-hosted runner. Move to a native arm64 runner if it gets painful.
       - uses: docker/setup-qemu-action@v4
+        if: ${{ matrix.emulate }}
       - uses: docker/setup-buildx-action@v4
 
       - uses: docker/login-action@v4
@@ -36,6 +55,10 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
+          # The matrix suffix on every tag, latest included: without onlatest
+          # the Hailo build would push a plain latest over the CPU image's.
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
             type=semver,pattern={{version}}
@@ -46,9 +69,11 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          file: docker/${{ matrix.variant }}/Dockerfile
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A scope per image, or the two would evict each other's layers.
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

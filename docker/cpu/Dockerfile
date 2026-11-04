@@ -1,4 +1,5 @@
-# CPU-only image for the CLI
+# CPU-only image for the CLI, for linux/amd64 and linux/arm64. Build from the
+# repo root: docker buildx build -f docker/cpu/Dockerfile .
 
 FROM python:3.14-slim-bookworm AS builder
 
