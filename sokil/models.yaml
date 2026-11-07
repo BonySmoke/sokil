@@ -1,9 +1,11 @@
-# Which trained weights this code expects.
+# Trained models configuration.
 #
-# Publishing a new version: see docs/training.md.
+# Publishing a new version: see docs/training.md. A model's formats are builds
+# of the same weights for an accelerator, published to the same release and
+# picked by SOKIL_MODEL_FORMAT; see docs/accelerators.md.
 
-# The GitHub repository whose releases carry the assets. SOKIL_MODELS_REPO
-# overrides it, e.g. to fetch from a fork.
+# The GitHub repository whose releases carry the assets.
+# set SOKIL_MODELS_REPO to override
 repo: BonySmoke/sokil
 
 models:
@@ -12,8 +14,6 @@ models:
     release_tag: models-2026-09-16
     asset: shuttle-detect.pt
     sha256: "d34da120cfa4b9f39d6123f9aaede2894dda5b3f0f42c300a2d8d253fa93ae5a"
-
-    # What these weights were trained to be fed.
     expects:
       imgsz: 640
       grayscale: true

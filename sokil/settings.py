@@ -1,8 +1,8 @@
 """
 Where the trained weights come from.
 
-Nothing here decides which model to use: models.yaml pins a version and a
-checksum per model, and this module only resolves what the manifest names,
+models.yaml pins a version and a checksum per model,
+and this module only resolves what the manifest names,
 downloading it when it is not already on disk.
 
 Resolution order for one model:
@@ -15,7 +15,6 @@ Resolution order for one model:
    fails if that is not possible.
 """
 
-import hashlib
 import logging
 import os
 import shutil
@@ -27,6 +26,9 @@ from pathlib import Path
 import platformdirs
 import requests
 import yaml
+
+from .archive import SUFFIX as ARCHIVE_SUFFIX
+from .archive import directory_name, sha256, unpack_directory
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,27 @@ class ModelName(str, Enum):
     COURT = "court"
 
 
+class ModelFormat(str, Enum):
+    """
+    Model formats
+    """
+
+    PT = "pt"
+    HAILO8 = "hailo8"
+    HAILO8L = "hailo8l"
+
+
+def _format(value: "ModelFormat | str") -> ModelFormat:
+    """A format from its name, reporting an unknown one with the known ones."""
+    try:
+        return ModelFormat(value)
+    except ValueError:
+        known = ", ".join(member.value for member in ModelFormat)
+        raise ModelResolutionError(
+            f"Unknown model format '{value}'. Known formats: {known}"
+        ) from None
+
+
 class ModelResolutionError(RuntimeError):
     """A model could not be resolved to a usable file on disk."""
 
@@ -62,17 +85,37 @@ class ModelSpec:
     asset: str
     sha256: str | None
     expects: dict
+    format: ModelFormat = ModelFormat.PT
+
+    @property
+    def is_archive(self) -> bool:
+        """Whether the asset is a .tar.gz of a model directory."""
+        return self.asset.endswith(ARCHIVE_SUFFIX)
+
+    @property
+    def local_name(self) -> str:
+        """The model as it sits on disk: the asset, or the directory it unpacks to."""
+        return directory_name(Path(self.asset)) if self.is_archive else self.asset
 
     @property
     def cache_path(self) -> Path:
         """
-        Where a downloaded copy of THIS version lives.
+        Where a downloaded copy of THIS version's asset lives.
 
         The version is part of the path, so bumping the manifest is a cache
         miss rather than a stale hit — which is the whole point — and two
         versions coexist, so moving between branches does not re-download.
         """
         return cache_dir() / f"{self.name}-{self.version}" / self.asset
+
+    @property
+    def cache_model_path(self) -> Path:
+        """The cached model: the asset itself, or the directory it unpacked to."""
+        return self.cache_path.with_name(self.local_name)
+
+    def is_present(self, path: Path) -> bool:
+        """Whether path holds this model: a directory for an archive, else a file."""
+        return path.is_dir() if self.is_archive else path.is_file()
 
     @property
     def url(self) -> str:
@@ -89,7 +132,9 @@ class ModelSpec:
         )
 
     def __str__(self) -> str:
-        return f"{self.name} {self.version}"
+        if self.format == ModelFormat.PT:
+            return f"{self.name} {self.version}"
+        return f"{self.name} {self.version} ({self.format.value})"
 
 
 def manifest_path() -> Path:
@@ -110,6 +155,16 @@ def _load_manifest(path: str) -> dict:
     if not isinstance(document, dict) or "models" not in document:
         raise ModelResolutionError(f"The manifest {path} has no 'models' section")
 
+    # A misspelt format key would otherwise surface only as "no such build"
+    # when something asks for it.
+    for name, entry in (document["models"] or {}).items():
+        for key in (entry or {}).get("formats") or {}:
+            if _format(key) == ModelFormat.PT:
+                raise ModelResolutionError(
+                    f"The manifest lists pt under formats of '{name}'; the "
+                    f"weights are the entry's own asset"
+                )
+
     return document
 
 
@@ -122,9 +177,21 @@ def model_names() -> list[str]:
     return list(manifest()["models"])
 
 
-def model_spec(name: ModelName | str) -> ModelSpec:
-    """The manifest entry for one model."""
+def model_format() -> ModelFormat:
+    """The format models resolve to. SOKIL_MODEL_FORMAT picks one, e.g. hailo8."""
+    return _format(os.environ.get("SOKIL_MODEL_FORMAT") or ModelFormat.PT)
+
+
+def model_spec(
+    name: ModelName | str, format: ModelFormat | str | None = None
+) -> ModelSpec:
+    """
+    The manifest entry for one model, in one format.
+
+    :param format: defaults to model_format().
+    """
     key = name.value if isinstance(name, ModelName) else str(name)
+    format = model_format() if format is None else _format(format)
     entries = manifest()["models"]
 
     if key not in entries:
@@ -140,16 +207,28 @@ def model_spec(name: ModelName | str) -> ModelSpec:
             f"The manifest entry for '{key}' is missing: {', '.join(missing)}"
         )
 
+    # A format is published to the same release as the weights it was built
+    # from, so only its asset and checksum differ.
+    published = entry
+    if format != ModelFormat.PT:
+        published = (entry.get("formats") or {}).get(format.value)
+        if not published or not published.get("asset"):
+            raise ModelResolutionError(
+                f"The manifest pins no {format.value} build of '{key}'. Pass the "
+                f"model path explicitly, or unset SOKIL_MODEL_FORMAT for the weights."
+            )
+
     # Everything is coerced to str because YAML infers types: an unquoted
     # date version arrives as datetime.date and an all-digit checksum as int.
-    checksum = entry.get("sha256")
+    checksum = published.get("sha256")
     return ModelSpec(
         name=key,
         version=str(entry["version"]),
         release_tag=str(entry["release_tag"]),
-        asset=str(entry["asset"]),
+        asset=str(published["asset"]),
         sha256=str(checksum).strip() if checksum else None,
         expects=entry.get("expects") or {},
+        format=format,
     )
 
 
@@ -192,23 +271,15 @@ def cache_dir() -> Path:
     return Path(platformdirs.user_cache_dir("sokil")) / "models"
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK_BYTES), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def search_paths(name: ModelName | str) -> list[Path]:
     """Every location this model is looked for, in precedence order."""
     spec = model_spec(name)
     configured = model_dir()
 
-    candidates = [] if configured is None else [configured / spec.asset]
-    candidates.append(CHECKOUT_MODELS_DIR / spec.asset)
-    candidates.append(Path.cwd() / "models" / spec.asset)
-    candidates.append(spec.cache_path)
+    candidates = [] if configured is None else [configured / spec.local_name]
+    candidates.append(CHECKOUT_MODELS_DIR / spec.local_name)
+    candidates.append(Path.cwd() / "models" / spec.local_name)
+    candidates.append(spec.cache_model_path)
 
     seen: set[Path] = set()
     paths = []
@@ -233,15 +304,17 @@ def resolve_model_path(name: ModelName | str) -> Path:
     candidates = search_paths(name)
 
     for path in candidates:
-        if not path.is_file():
+        if not spec.is_present(path):
             continue
 
-        if path == spec.cache_path:
+        if path == spec.cache_model_path:
             # A cached copy is one we fetched, so it is the one the manifest
             # checksum describes. A mismatch is reported and then tolerated:
             # refusing to run would strand someone mid-session over a file
-            # that is very probably just an older download.
-            _warn_unless_verified(path, spec)
+            # that is very probably just an older download. An unpacked
+            # archive is checked by the archive it came from.
+            if spec.cache_path.is_file():
+                _warn_unless_verified(spec.cache_path, spec)
         else:
             logger.info("Using the local %s weights at %s", spec.name, path)
 
@@ -316,10 +389,11 @@ def download_model(name: ModelName | str, force: bool = False) -> Path:
     spec = model_spec(name)
     target = spec.cache_path
 
-    if target.is_file() and not force:
-        logger.info("%s already cached at %s", spec, target)
-        _warn_unless_verified(target, spec)
-        return target
+    if spec.is_present(spec.cache_model_path) and not force:
+        logger.info("%s already cached at %s", spec, spec.cache_model_path)
+        if target.is_file():
+            _warn_unless_verified(target, spec)
+        return spec.cache_model_path
 
     url = spec.url
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -362,8 +436,16 @@ def download_model(name: ModelName | str, force: bool = False) -> Path:
         logger.debug("Verified %s against the manifest checksum", spec.asset)
 
     partial.replace(target)
-    logger.info("Cached %s at %s", spec, target)
-    return target
+
+    if spec.is_archive:
+        try:
+            unpack_directory(target)
+        except ValueError as error:
+            raise ModelResolutionError(str(error)) from error
+
+    logger.info("Cached %s at %s", spec, spec.cache_model_path)
+
+    return spec.cache_model_path
 
 
 def download_models(force: bool = False) -> dict[str, Path]:

@@ -557,9 +557,9 @@ def models_for(
         the court detector's — the last only when a court has to be solved.
     """
     from ..models import Segmenter
-    from ..settings import ModelName, ensure_model_path, model_spec
+    from ..settings import ModelFormat, ModelName, ensure_model_path, model_spec
 
-    shuttle_expects = model_spec(ModelName.SHUTTLE).expects
+    shuttle_expects = model_spec(ModelName.SHUTTLE, ModelFormat.PT).expects
     shuttle_kwargs = {
         "model": shuttle_path or str(ensure_model_path(ModelName.SHUTTLE)),
         "imgsz": shuttle_expects.get("imgsz", 640),
@@ -567,7 +567,7 @@ def models_for(
 
     court_kwargs = None
     if need_court:
-        court_expects = model_spec(ModelName.COURT).expects
+        court_expects = model_spec(ModelName.COURT, ModelFormat.PT).expects
         court_kwargs = {
             "segmentation_model": Segmenter(
                 court_path or str(ensure_model_path(ModelName.COURT)),

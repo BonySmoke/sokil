@@ -53,8 +53,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM base AS runtime
 
+# SOKIL_MODEL_FORMAT: models without a path resolve to the HEFs models.yaml pins.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
+    SOKIL_MODEL_FORMAT=hailo8 \
     SOKIL_CACHE_DIR=/cache \
     YOLO_CONFIG_DIR=/tmp/ultralytics \
     MPLCONFIGDIR=/tmp/matplotlib

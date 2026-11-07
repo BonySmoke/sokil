@@ -26,6 +26,12 @@ HAILO_ARGS ?=
 # the CPU. Override either way, e.g. HAILO_GPUS= or HAILO_GPUS=device=0.
 HAILO_GPUS ?= $(if $(shell command -v nvidia-smi),all)
 
+# --- Release -----------------------------------------------------------------
+# The compiled *_hailo_model directories to publish, e.g.
+# training/shuttle/hailo/train-hailo8_hailo_model.
+SHUTTLE_HEF ?=
+COURT_HEF ?=
+
 # --- Cloud -------------------------------------------------------------------
 # The suite tarball from the Hailo Developer Zone, for hailo-cloud-suite.
 SUITE ?=
@@ -47,6 +53,10 @@ hailo-build:  ## Build the Hailo compile image for hailo-local (linux/amd64, nee
 hailo-local:  ## Compile to HEF on this machine, e.g. make hailo-local COURT_WEIGHTS=… SHUTTLE_WEIGHTS=…
 	@$(hailo_env) HAILO_IMAGE="$(HAILO_IMAGE)" HAILO_GPUS="$(HAILO_GPUS)" \
 		$(hailo_sh) local $(hailo_models)
+
+hailo-release:  ## Publish compiled models to their weights' release, e.g. make hailo-release SHUTTLE_HEF=… COURT_HEF=…
+	uv run sokil models publish --format $(HAILO_ARCH) \
+		--model shuttle="$(SHUTTLE_HEF)" --model court="$(COURT_HEF)"
 
 hailo-cloud-setup:  ## Create or update the cloud compile's bucket, role and security group (asks first)
 	@$(hailo_sh) cloud-setup

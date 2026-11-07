@@ -76,12 +76,25 @@ Each model that compiled ends up in `training/<model>/hailo/<stem>-hailo8_hailo_
 
 Before relying on a HEF, compare it with the `.pt` weights on the `test` split: INT8 quantization can cost accuracy.
 
-On the Pi, `make review-hailo` runs the published `-hailo` image with the device passed through. Its HailoRT must match the host's (see [docker/hailo](../docker/hailo/README.md)); set `HAILO_REVIEW_IMAGE` to use your own build.
+### Publishing
+
+To publish models, run:
 
 ```bash
-make review-hailo ARGS="--video-path clip.mp4 --output-path review.mp4 \
-    --shuttle-detector-model-path models/shuttle-hailo8_hailo_model \
-    --court-segmentation-model-path models/court-hailo8_hailo_model"
+make hailo-release SHUTTLE_HEF=training/shuttle/hailo/train-hailo8_hailo_model \
+    COURT_HEF=training/court/hailo/train-hailo8_hailo_model
 ```
 
-The model directories' names must end in `_hailo_model`.
+It uploads each directory as a `.tar.gz` to the release and prints the `formats` entries to add to `sokil/models.yaml`. Once they are committed, the Hailo image downloads the HEFs instead of other formats.
+
+### Running
+
+On the Pi, `make review-hailo` runs the published `-hailo` image with the device passed through. Its HailoRT must match the host's (see [docker/hailo](../docker/hailo/README.md)).
+
+Set `HAILO_REVIEW_IMAGE` to use your own build.
+
+```bash
+make review-hailo ARGS="--video-path clip.mp4 --output-path review.mp4"
+```
+
+To use other models, pass `--shuttle-detector-model-path` and `--court-segmentation-model-path`; the directories' names must end in `_hailo_model`.
