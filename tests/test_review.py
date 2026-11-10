@@ -43,39 +43,63 @@ class FakeSource:
 
 
 class FakeTracker:
-    def __init__(self, tracks=()):
+    """Records, into events, when its detector would be loaded and used."""
+
+    def __init__(self, tracks=(), events=None):
         self.tracks = list(tracks)
         self.sources = []
+        self.events = [] if events is None else events
+
+    def __enter__(self):
+        self.events.append("load detector")
+        return self
+
+    def __exit__(self, *exc_info):
+        self.events.append("release detector")
 
     def track(self, source):
         self.sources.append(source)
+        self.events.append("track")
         return self.tracks
 
 
 class FakeSolver:
-    def __init__(self, court=None):
+    """Records, into events, when its court models would be loaded and used."""
+
+    def __init__(self, court=None, events=None):
         self.court = court
         self.court_detector_kwargs = {}
         self.consensus_verticals = []
         self.consensus_horizontals = []
         self.calls = 0
+        self.events = [] if events is None else events
+
+    def __enter__(self):
+        self.events.append("load court models")
+        return self
+
+    def __exit__(self, *exc_info):
+        self.events.append("release court models")
 
     def solve(self, source):
         self.calls += 1
+        self.events.append("solve")
         return self.court
 
 
 class FakeRenderer:
-    def __init__(self, config=None):
+    def __init__(self, config=None, events=None):
         self.config = config or RenderConfig()
         self.rendered = []
         self.assigned = []
+        self.events = [] if events is None else events
 
     def assign_track_points(self, tracks, trajectories):
         self.assigned.append((tracks, trajectories))
 
     def render(self, source, tracks, court, output_path, explainer=None):
         self.rendered.append((source, tracks, court, output_path, explainer))
+        self.events.append("render")
 
 
 @pytest.fixture
@@ -172,16 +196,27 @@ class TestUndistortion:
 
 
 class TestPreprocess:
-    def test_detects_the_shuttle_then_solves_the_court(self, review, make_track):
+    def test_solves_the_court_then_detects_the_shuttle(self, review, make_track):
         tracks = bounce_tracks(make_track)
-        review.tracker = FakeTracker(tracks)
         solved = Court.from_homography(np.eye(3))
-        review.court_solver = FakeSolver(solved)
+        events = []
+        review.tracker = FakeTracker(tracks, events)
+        review.court_solver = FakeSolver(solved, events)
 
         review.preprocess()
 
         assert review.tracks == tracks
         assert review.court is solved
+        # one model at a time: the court models are gone before the detector
+        # loads, as a device serving one model at a time needs
+        assert events == [
+            "load court models",
+            "solve",
+            "release court models",
+            "load detector",
+            "track",
+            "release detector",
+        ]
 
     def test_a_supplied_homography_is_used_instead_of_solving(self, review):
         review.court_homography = np.eye(3)
@@ -190,6 +225,7 @@ class TestPreprocess:
         review.preprocess()
 
         assert review.court_solver.calls == 0
+        assert review.court_solver.events == []
         assert review.court.get_view_transformer() is not None
 
     def test_an_unsolvable_court_leaves_the_review_without_one(self, review):
@@ -278,6 +314,20 @@ class TestRendering:
 
     def test_no_explainer_unless_it_was_asked_for(self, review):
         assert review._explainer() is None
+
+    def test_a_plain_render_loads_no_court_models(self, review):
+        review.video_to_file("review.mp4")
+
+        assert review.court_solver.events == []
+
+    def test_an_explained_render_has_the_court_models_loaded(self, review):
+        events = []
+        review.court_solver = FakeSolver(events=events)
+        review.renderer = FakeRenderer(RenderConfig(explain=True), events)
+
+        review.video_to_file("review.mp4")
+
+        assert events == ["load court models", "render", "release court models"]
 
     def test_the_explainer_carries_the_solvers_consensus_lines(self, review):
         review.renderer.config = RenderConfig(explain=True)

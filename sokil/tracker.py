@@ -6,13 +6,14 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Self
 
 import cv2
 import numpy as np
 from rich.progress import Progress
 
 from .frame import ShuttleTrack
-from .models import ShuttleDetector
+from .models import Model, ShuttleDetector
 from .shuttle import DirectionTracker, estimate_cork_position
 from .util import laplacian_blur_metric, signed_angle_change
 from .video import VideoSource
@@ -66,6 +67,19 @@ class ShuttleTracker:
             )
 
         self.detector = detector
+
+    def __enter__(self) -> Self:
+        """
+        Load the detector before the first frame; see sokil.models. A
+        ground-truth source in its place has nothing to load.
+        """
+        if isinstance(self.detector, Model):
+            self.detector.load()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        if isinstance(self.detector, Model):
+            self.detector.release()
 
     def _new_kalman(self) -> cv2.KalmanFilter:
         # 4 dynamic params (x, y, dx, dy), 2 measured (x, y)

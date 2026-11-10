@@ -10,7 +10,13 @@ from typing import ClassVar
 import numpy as np
 import pytest
 
-from sokil.models import Model, PoseEstimator, Segmenter, ShuttleDetector, _to_numpy
+from sokil.models import (
+    Model,
+    PoseEstimator,
+    Segmenter,
+    ShuttleDetector,
+    _to_numpy,
+)
 
 
 class FakeTensor:
@@ -147,6 +153,82 @@ class TestModel:
 
     def test_the_repr_names_the_checkpoint(self):
         assert repr(ShuttleDetector("weights.pt")) == "ShuttleDetector('weights.pt')"
+
+
+class TestLifecycle:
+    """A model holds its device only between load() and release()."""
+
+    def test_nothing_is_loaded_until_it_is_asked_for(self):
+        model = Model("weights.pt")
+
+        assert not model.loaded
+        assert FakeYOLO.instances == []
+
+    def test_loading_warms_it_up_on_a_blank_frame_of_its_size(self):
+        model = Model("weights.pt", imgsz=320).load()
+
+        image, kwargs = model.model.calls[0]
+        assert model.loaded
+        assert image.shape == (320, 320, 3)
+        assert kwargs["imgsz"] == 320
+
+    def test_loading_twice_warms_it_up_once(self):
+        model = Model("weights.pt").load()
+        model.load()
+
+        assert len(FakeYOLO.instances) == 1
+        assert len(model.model.calls) == 1
+
+    def test_releasing_drops_the_model_and_a_later_use_loads_it_again(self):
+        model = Model("weights.pt").load()
+
+        model.release()
+
+        assert not model.loaded
+        model.model.results = [FakeResult()]
+        assert len(FakeYOLO.instances) == 2
+
+    def test_releasing_what_was_never_loaded_is_harmless(self):
+        Model("weights.pt").release()
+
+    def test_a_with_block_loads_on_entry_and_releases_on_exit(self):
+        with Model("weights.pt") as model:
+            assert model.loaded
+
+        assert not model.loaded
+
+
+class TestStagesOwnTheirModels:
+    def test_the_court_solver_loads_its_segmenter_for_the_block(self):
+        from sokil.court import CourtSolver
+
+        segmenter, keypoints = Segmenter("court.pt"), PoseEstimator("pose.pt")
+        solver = CourtSolver(
+            {"segmentation_model": segmenter, "keypoint_model": keypoints}
+        )
+
+        with solver:
+            assert segmenter.loaded
+            # optional, so left to load on first use
+            assert not keypoints.loaded
+
+        assert not segmenter.loaded
+
+    def test_the_tracker_loads_its_detector_for_the_block(self):
+        from sokil.tracker import ShuttleTracker
+
+        tracker = ShuttleTracker({"model": "shuttle.pt"})
+
+        with tracker:
+            assert tracker.detector.loaded
+
+        assert not tracker.detector.loaded
+
+    def test_a_tracker_fed_ground_truth_has_nothing_to_load(self):
+        from sokil.tracker import ShuttleTracker
+
+        with ShuttleTracker(detector=object()) as tracker:
+            assert tracker.detector is not None
 
 
 class TestShuttleDetector:

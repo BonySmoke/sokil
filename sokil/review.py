@@ -114,9 +114,9 @@ class Review:
         return Undistorter(K, dist)
 
     def preprocess(self):
-        """Detect the shuttle on every frame, then establish the session court."""
-        self.tracks = self.tracker.track(self.source)
-
+        """
+        Establish the session court, then detect the shuttle on every frame.
+        """
         if self.court_homography is not None:
             logger.info("Using the supplied court homography (not solving)")
             self.court = Court.from_homography(
@@ -125,9 +125,12 @@ class Review:
                     "court_config"
                 ),
             )
-            return
+        else:
+            with self.court_solver:
+                self.court = self.court_solver.solve(self.source)
 
-        self.court = self.court_solver.solve(self.source)
+        with self.tracker:
+            self.tracks = self.tracker.track(self.source)
 
     def set_frame_hit_candidates(self, config: HitDetectionConfig | None = None):
         """
@@ -152,10 +155,18 @@ class Review:
         self.renderer.assign_track_points(self.tracks, self.trajectories)
 
     def video_to_file(self, output_path: str):
-        """Store the review video to the file."""
-        self.renderer.render(
-            self.source, self.tracks, self.court, output_path, self._explainer()
-        )
+        """
+        Store the review video to the file.
+        """
+        explainer = self._explainer()
+        if explainer is None:
+            self.renderer.render(self.source, self.tracks, self.court, output_path)
+            return
+
+        with self.court_solver:
+            self.renderer.render(
+                self.source, self.tracks, self.court, output_path, explainer
+            )
 
     def _explainer(self) -> "Explainer | None":
         if not self.renderer.config.explain:

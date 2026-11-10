@@ -3,10 +3,23 @@ The YOLO models the pipeline infers with.
 
 One class per task, so callers ask for the shape they want — a box, a set of
 polygons, a set of keypoints — rather than reaching into a raw result.
+
+A model holds its device only while it is loaded. An accelerator such as a
+Hailo-8 serves one model at a time, and a small GPU may fit only one, so each
+stage loads its models on the way in and releases them on the way out:
+
+    with Segmenter(path) as segmenter:   # loads and warms up, before any frame
+        segmenter.polygons(frame)
+                                         # released here
+
+Used without `with`, a model loads on its first prediction and keeps its device.
 """
 
+import gc
 import logging
+import sys
 from pathlib import Path
+from typing import Self
 
 import numpy as np
 
@@ -25,13 +38,60 @@ class Model:
         device: str | None = None,
         imgsz: int = 640,
     ):
-        from ultralytics import YOLO
-
         self.model_path = str(model_path)
         self.confidence = confidence
         self.device = device
         self.imgsz = imgsz
-        self.model = YOLO(self.model_path, task=self.task)
+        self._model = None
+
+    @property
+    def model(self):
+        """The YOLO model, loaded on first use if load() was not called."""
+        if self._model is None:
+            from ultralytics import YOLO
+
+            logger.debug("Loading %s", self.model_path)
+            self._model = YOLO(self.model_path, task=self.task)
+        return self._model
+
+    @property
+    def loaded(self) -> bool:
+        return self._model is not None
+
+    def load(self) -> Self:
+        """
+        Load the model and run one blank frame through it.
+
+        Ultralytics sets up an exported model only on
+        its first prediction, so run a blank prediction for faster predictions on real data
+        """
+        if not self.loaded:
+            self.predict(np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8))
+        return self
+
+    def release(self) -> None:
+        """
+        Give the device back for the next model.
+
+        Ultralytics' Hailo backend closes its device when it is collected, and
+        torch keeps freed GPU memory cached until asked to return it.
+        """
+        if not self.loaded:
+            return
+
+        logger.debug("Releasing %s", self.model_path)
+        self._model = None
+        gc.collect()
+
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def __enter__(self) -> Self:
+        return self.load()
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
 
     def predict(self, image: np.ndarray, confidence: float | None = None):
         """
