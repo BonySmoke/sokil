@@ -91,7 +91,7 @@ It uploads each directory as a `.tar.gz` to the release and prints the `formats`
 
 On the Pi, `make review-hailo` runs the published `-hailo` image with the device passed through. Its HailoRT must match the host's (see [docker/hailo](../docker/hailo/README.md)).
 
-Set `HAILO_REVIEW_IMAGE` to use your own build.
+To use your own build, run `make build-hailo` and set `HAILO_REVIEW_IMAGE=sokil-hailo:dev`.
 
 ```bash
 make review-hailo ARGS="--video-path clip.mp4 --output-path review.mp4"

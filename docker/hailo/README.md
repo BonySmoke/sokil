@@ -4,8 +4,8 @@ The CLI with HailoRT, for running Hailo HEF models on a Raspberry Pi with a
 Hailo accelerator, e.g. a Raspberry Pi 5 with a Hailo-8. linux/arm64 only.
 
 ```bash
-docker buildx build -f docker/hailo/Dockerfile -t sokil-hailo:dev .
-docker run --device /dev/hailo0 ... sokil-hailo:dev review ...
+make build-hailo                                   # tags sokil-hailo:dev
+make review-hailo HAILO_REVIEW_IMAGE=sokil-hailo:dev ARGS="--video-path ..."
 ```
 
 Releases publish it as `ghcr.io/bonysmoke/sokil` with a `-hailo` suffix on the
@@ -31,8 +31,8 @@ on the path.
 
 HailoRT's userspace library talks to the host's kernel driver and the device's
 firmware, and all three must be the same version. Check the host's with
-`apt-cache policy hailort python3-hailort` and pass them as `HAILORT_VERSION`
-and `PYHAILORT_VERSION` build args.
+`apt-cache policy hailort python3-hailort` and build with those, e.g.
+`make build-hailo HAILORT_VERSION=4.23.0 PYHAILORT_VERSION=4.23.0-1`.
 
 The host keeps the driver (`hailort-pcie-driver`) and the firmware; nothing in
 the image installs them.

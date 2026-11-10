@@ -47,10 +47,17 @@ mounts = -v "$(PWD)":/data -v "$(MODELS_VOLUME)":/cache
 tty_flag = $$([ -t 1 ] && echo -t)
 docker_run = docker run --rm $(tty_flag) $(mounts) --user $(UID):$(GID) $(IMAGE)
 
-# review-hailo: the published Hailo image by default, as a Pi has nothing built
-# locally. Its HailoRT must match the host's; see docker/hailo/README.md.
+# --- Hailo image (Raspberry Pi with a Hailo accelerator) ---------------------
+HAILO_BUILD_IMAGE ?= sokil-hailo:dev
 HAILO_REVIEW_IMAGE ?= ghcr.io/bonysmoke/sokil:latest-hailo
 HAILO_DEVICE ?= /dev/hailo0
+# The host's HailoRT, which the image's must match (see docker/hailo/README.md);
+# left unset, the Dockerfile's own versions are built.
+HAILORT_VERSION ?=
+PYHAILORT_VERSION ?=
+
+hailort_args = $(if $(HAILORT_VERSION),--build-arg HAILORT_VERSION=$(HAILORT_VERSION)) \
+	$(if $(PYHAILORT_VERSION),--build-arg PYHAILORT_VERSION=$(PYHAILORT_VERSION))
 
 .DEFAULT_GOAL := help
 
@@ -78,6 +85,9 @@ build:  ## Build the application image for this machine
 
 build-multi-arch:  ## Build a multi-arch image
 	docker buildx build -f docker/cpu/Dockerfile --platform $(PLATFORMS) -t $(IMAGE) .
+
+build-hailo:  ## Build the Hailo image for a Raspberry Pi (linux/arm64), e.g. make build-hailo HAILORT_VERSION=4.23.0
+	docker buildx build -f docker/hailo/Dockerfile --platform linux/arm64 --load $(hailort_args) -t $(HAILO_BUILD_IMAGE) .
 
 review:  ## Run a review in the container, e.g. make review ARGS="--video-path a.mp4 --output-path b.mp4"
 	$(docker_run) review $(ARGS)
