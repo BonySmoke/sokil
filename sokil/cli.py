@@ -112,10 +112,22 @@ def review(
         bool,
         typer.Option(help="Explain the stages of the review visually"),
     ] = False,
+    stats_path: Annotated[
+        str | None,
+        typer.Option(
+            help="Also write the run stats (time per stage, model load times "
+            "and fps) to this JSON file"
+        ),
+    ] = None,
     verbose: Annotated[
         bool, typer.Option(help="Enable debug logging (per-hit verdicts, etc.)")
     ] = False,
 ):
+    # Imported here rather than by the first model load, so the run stats count
+    # it, torch with it, as startup.
+    import ultralytics  # noqa: F401
+    from rich.console import Console
+
     from sokil.court import CourtSolverConfig, load_homography, save_homography
     from sokil.models import PoseEstimator, Segmenter
     from sokil.render import RenderConfig
@@ -188,6 +200,7 @@ def review(
         court_solver_config=CourtSolverConfig(sample_seconds=court_sample_seconds),
     )
 
+    review.stats.start()
     review.preprocess()
 
     if save_court_homography_path:
@@ -202,6 +215,12 @@ def review(
     review.set_track_points()
 
     review.video_to_file(output_path)
+
+    stats = review.run_stats()
+    Console().print(stats.table())
+    if stats_path:
+        stats.write(stats_path)
+        logging.getLogger(__name__).info("Run stats written -> %s", stats_path)
 
 
 @models_app.command("download")

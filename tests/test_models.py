@@ -179,6 +179,16 @@ class TestLifecycle:
         assert len(FakeYOLO.instances) == 1
         assert len(model.model.calls) == 1
 
+    def test_the_warm_up_counts_as_the_load_not_as_an_inference(self):
+        model = Model("weights.pt").load()
+        model.predict(np.zeros((4, 4, 3), np.uint8))
+        model.predict(np.zeros((4, 4, 3), np.uint8))
+
+        assert model.loads == 1
+        assert model.load_seconds > 0
+        assert model.inferences == 2
+        assert model.inference_seconds > 0
+
     def test_releasing_drops_the_model_and_a_later_use_loads_it_again(self):
         model = Model("weights.pt").load()
 

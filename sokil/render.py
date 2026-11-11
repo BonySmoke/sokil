@@ -111,6 +111,7 @@ class ReviewRenderer:
 
         :param explainer: when given (and a court was solved), each landing is
             explained stage by stage.
+        :returns: how many source frames were rendered.
         """
         logger.info("Rendering review video -> %s", output_path)
 
@@ -144,10 +145,12 @@ class ReviewRenderer:
             "Rendering review", total=source.frame_count or None
         )
         progress.start()
+        rendered = 0
 
         try:
             for decoded in source:
                 progress.advance(progress_task)
+                rendered += 1
                 shuttle_track = track_index.get(decoded.number)
 
                 if shuttle_track is None:
@@ -213,6 +216,7 @@ class ReviewRenderer:
             output.release()
 
         logger.info("Review video written -> %s", output_path)
+        return rendered
 
     def _hit_closeup(
         self, shuttle_track: ShuttleTrack, court: Court, source: VideoSource

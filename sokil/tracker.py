@@ -67,6 +67,8 @@ class ShuttleTracker:
             )
 
         self.detector = detector
+        # how many frames the last track() went through, shuttle or not
+        self.frames_processed = 0
 
     def __enter__(self) -> Self:
         """
@@ -201,6 +203,7 @@ class ShuttleTracker:
                 execution_times.append(time.perf_counter() - start_time)
         finally:
             progress.stop()
+            self.frames_processed = frame_count
 
         logger.info(
             "Shuttle detection done: %d/%d frames have a shuttle "

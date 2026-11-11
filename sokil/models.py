@@ -18,6 +18,7 @@ Used without `with`, a model loads on its first prediction and keeps its device.
 import gc
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Self
 
@@ -44,6 +45,13 @@ class Model:
         self.imgsz = imgsz
         self._model = None
 
+        # What sokil.timing reports: loads include the warm-up frame, and
+        # inferences time the predict call alone.
+        self.loads = 0
+        self.load_seconds = 0.0
+        self.inferences = 0
+        self.inference_seconds = 0.0
+
     @property
     def model(self):
         """The YOLO model, loaded on first use if load() was not called."""
@@ -66,7 +74,10 @@ class Model:
         its first prediction, so run a blank prediction for faster predictions on real data
         """
         if not self.loaded:
-            self.predict(np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8))
+            started = time.perf_counter()
+            self._predict(np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8))
+            self.loads += 1
+            self.load_seconds += time.perf_counter() - started
         return self
 
     def release(self) -> None:
@@ -100,6 +111,14 @@ class Model:
         The frame is passed as a numpy array, which YOLO reads as BGR — the same
         order OpenCV decodes into — so no colour conversion is needed here.
         """
+        model = self.model
+        started = time.perf_counter()
+        result = self._predict(image, confidence, model)
+        self.inferences += 1
+        self.inference_seconds += time.perf_counter() - started
+        return result
+
+    def _predict(self, image: np.ndarray, confidence: float | None = None, model=None):
         kwargs = {
             "conf": self.confidence if confidence is None else confidence,
             "imgsz": self.imgsz,
@@ -109,7 +128,7 @@ class Model:
         if self.device:
             kwargs["device"] = self.device
 
-        results = self.model.predict(image, **kwargs)
+        results = (model or self.model).predict(image, **kwargs)
         return results[0] if results else None
 
     def __repr__(self) -> str:
