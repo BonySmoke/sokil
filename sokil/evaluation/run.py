@@ -111,14 +111,17 @@ def run_clip(
     substitution hidden behind a flag is a substitution nobody checks.
     """
     source = VideoSource(str(video_path), grayscale=grayscale)
-    shuttle_tracks = ShuttleTracker(detector=detector, config=tracker_config).track(
-        source
-    )
+
+    # Each stage holds its model only while it runs, so a device that serves
+    # one model at a time, such as a Hailo-8, has each to itself.
+    with ShuttleTracker(detector=detector, config=tracker_config) as tracker:
+        shuttle_tracks = tracker.track(source)
 
     if court is None:
         if court_solver is None:
             raise ValueError("Give either a court or a solver to find one with")
-        court = court_solver.solve(source)
+        with court_solver:
+            court = court_solver.solve(source)
 
     if court is None:
         logger.warning("%s: no court was solved; nothing can be judged", clip_id)
