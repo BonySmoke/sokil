@@ -24,6 +24,11 @@ cvat = $(COMPOSE) -f $(CVAT_COMPOSE) $(cvat_share_overlay) --env-file $(CVAT_ENV
 # --- Application image -------------------------------------------------------
 IMAGE ?= sokil:dev
 PLATFORMS ?= linux/amd64,linux/arm64
+# Dependency groups to add to an image, space separated, e.g.
+# make build-hailo GROUPS=dataset HAILO_BUILD_IMAGE=sokil-hailo:eval for an
+# image that can run `sokil evaluate`.
+GROUPS ?=
+groups_arg = $(if $(strip $(GROUPS)),--build-arg UV_GROUPS="$(GROUPS)")
 
 # the release tag to publish to, e.g. make models-release MODELS_TAG=models-2026-09-06
 MODELS_TAG ?=
@@ -81,13 +86,13 @@ test-unit:  ## Run the unit tests with coverage, as CI does
 	uv run pytest --cov --cov-report=term-missing
 
 build:  ## Build the application image for this machine
-	docker buildx build -f docker/cpu/Dockerfile -t $(IMAGE) .
+	docker buildx build -f docker/cpu/Dockerfile $(groups_arg) -t $(IMAGE) .
 
 build-multi-arch:  ## Build a multi-arch image
-	docker buildx build -f docker/cpu/Dockerfile --platform $(PLATFORMS) -t $(IMAGE) .
+	docker buildx build -f docker/cpu/Dockerfile --platform $(PLATFORMS) $(groups_arg) -t $(IMAGE) .
 
 build-hailo:  ## Build the Hailo image for a Raspberry Pi (linux/arm64), e.g. make build-hailo HAILORT_VERSION=4.23.0
-	docker buildx build -f docker/hailo/Dockerfile --platform linux/arm64 --load $(hailort_args) -t $(HAILO_BUILD_IMAGE) .
+	docker buildx build -f docker/hailo/Dockerfile --platform linux/arm64 --load $(hailort_args) $(groups_arg) -t $(HAILO_BUILD_IMAGE) .
 
 review:  ## Run a review in the container, e.g. make review ARGS="--video-path a.mp4 --output-path b.mp4"
 	$(docker_run) review $(ARGS)

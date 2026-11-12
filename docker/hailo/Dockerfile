@@ -35,6 +35,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# Dependency groups to install besides the project's own dependencies, space
+# separated, e.g. "dataset" for `sokil evaluate`; none by default.
+ARG UV_GROUPS=""
+
 # Debian's Python, so the venv sees hailo_platform in its dist-packages.
 RUN uv venv --system-site-packages --python /usr/bin/python3 /opt/venv
 
@@ -42,13 +46,15 @@ RUN uv venv --system-site-packages --python /usr/bin/python3 /opt/venv
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-default-groups --no-install-project
+    set --; for group in $UV_GROUPS; do set -- "$@" --group "$group"; done; \
+    uv sync --frozen --no-default-groups --no-install-project "$@"
 
 # --no-editable copies the project into the venv, as /app is not in the runtime.
 COPY sokil/ /app/sokil/
 COPY pyproject.toml uv.lock README.md /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-default-groups --no-editable
+    set --; for group in $UV_GROUPS; do set -- "$@" --group "$group"; done; \
+    uv sync --frozen --no-default-groups --no-editable "$@"
 
 
 FROM base AS runtime

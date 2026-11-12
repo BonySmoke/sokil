@@ -8,6 +8,14 @@ make build-hailo                                   # tags sokil-hailo:dev
 make review-hailo HAILO_REVIEW_IMAGE=sokil-hailo:dev ARGS="--video-path ..."
 ```
 
+The image holds only what a review needs. For `sokil evaluate`, add the
+`dataset` dependency group as a separate tag (`GROUPS` works for `make build`
+too):
+
+```bash
+make build-hailo GROUPS=dataset HAILO_BUILD_IMAGE=sokil-hailo:eval
+```
+
 Releases publish it as `ghcr.io/bonysmoke/sokil` with a `-hailo` suffix on the
 CPU image's tags, e.g. `latest-hailo` or `1.2.0-hailo`, built with the
 `HAILORT_VERSION` in the Dockerfile; a host on another HailoRT version needs
