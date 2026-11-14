@@ -1,28 +1,12 @@
 # Hailo image
 
-The CLI with HailoRT, for running Hailo HEF models on a Raspberry Pi with a
-Hailo accelerator, e.g. a Raspberry Pi 5 with a Hailo-8. linux/arm64 only.
+The CLI with HailoRT, for running Hailo HEF models on a Raspberry Pi with a Hailo accelerator, e.g. a Raspberry Pi 5 with a Hailo-8.
+linux/arm64 only.
 
 ```bash
-make build-hailo                                   # tags sokil-hailo:dev
+make build-hailo
 make review-hailo HAILO_REVIEW_IMAGE=sokil-hailo:dev ARGS="--video-path ..."
 ```
-
-The image holds only what a review needs. For `sokil evaluate`, add the
-`dataset` dependency group as a separate tag (`GROUPS` works for `make build`
-too):
-
-```bash
-make build-hailo GROUPS=dataset HAILO_BUILD_IMAGE=sokil-hailo:eval
-```
-
-Releases publish it as `ghcr.io/bonysmoke/sokil` with a `-hailo` suffix on the
-CPU image's tags, e.g. `latest-hailo` or `1.2.0-hailo`, built with the
-`HAILORT_VERSION` in the Dockerfile; a host on another HailoRT version needs
-its own build.
-
-Like `docker/cpu`, it builds from the repo root; `Dockerfile.dockerignore`
-here keeps the context to what it needs.
 
 ## Why Debian's Python
 
@@ -37,13 +21,8 @@ on the path.
 
 ## Matching the host
 
-HailoRT's userspace library talks to the host's kernel driver and the device's
-firmware, and all three must be the same version. Check the host's with
-`apt-cache policy hailort python3-hailort` and build with those, e.g.
-`make build-hailo HAILORT_VERSION=4.23.0 PYHAILORT_VERSION=4.23.0-1`.
-
-The host keeps the driver (`hailort-pcie-driver`) and the firmware; nothing in
-the image installs them.
+HailoRT's userspace library talks to the host's kernel driver and the device's firmware, and all three must be the same version.
+Check the host's with `apt-cache policy hailort python3-hailort` and build with those, e.g. `make build-hailo HAILORT_VERSION=4.23.0 PYHAILORT_VERSION=4.23.0-1`.
 
 ## The apt setup in `rootfs/`
 

@@ -1,5 +1,4 @@
-# CPU-only image for the CLI, for linux/amd64 and linux/arm64. Build from the
-# repo root: docker buildx build -f docker/cpu/Dockerfile .
+# CPU-only image
 
 FROM python:3.14-slim-bookworm AS builder
 
@@ -28,6 +27,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # back to /app, which does not exist in the runtime stage.
 COPY sokil/ /app/sokil/
 COPY pyproject.toml uv.lock README.md /app/
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     set --; for group in $UV_GROUPS; do set -- "$@" --group "$group"; done; \
     uv sync --frozen --no-default-groups --no-editable "$@"
