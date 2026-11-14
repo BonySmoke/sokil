@@ -201,6 +201,12 @@ class TestRunClip:
         )
 
         class FailingSolver:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                pass
+
             def solve(self, source):
                 return None
 
@@ -241,6 +247,12 @@ class TestRunClip:
         clip_id, row, path = clip
 
         class FailingSolver:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                pass
+
             def solve(self, source):
                 return None
 

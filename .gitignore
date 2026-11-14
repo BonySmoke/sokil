@@ -20,3 +20,15 @@ weights
 .ruff_cache
 evaluations
 dataset
+
+# OpenTofu: state is local and per machine; the provider lock file is committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+# Per-account settings, e.g. the region of infra/hailo/cloud/persistent.
+terraform.tfvars
+crash.log
+
+# Written from uv.lock by infra/hailo/hailo.sh before each build.
+infra/hailo/image/requirements.txt

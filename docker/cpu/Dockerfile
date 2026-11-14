@@ -1,4 +1,4 @@
-# CPU-only image for the CLI
+# CPU-only image
 
 FROM python:3.14-slim-bookworm AS builder
 
@@ -11,19 +11,26 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# Dependency groups to install besides the project's own dependencies, space
+# separated, e.g. "dataset" for `sokil evaluate`; none by default.
+ARG UV_GROUPS=""
+
 # Dependencies first, without the project itself, so a source change does not
 # invalidate the cached dependency layer.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-default-groups --no-install-project
+    set --; for group in $UV_GROUPS; do set -- "$@" --group "$group"; done; \
+    uv sync --frozen --no-default-groups --no-install-project "$@"
 
 # Then the project. --no-editable copies it into the venv rather than linking
 # back to /app, which does not exist in the runtime stage.
 COPY sokil/ /app/sokil/
 COPY pyproject.toml uv.lock README.md /app/
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-default-groups --no-editable
+    set --; for group in $UV_GROUPS; do set -- "$@" --group "$group"; done; \
+    uv sync --frozen --no-default-groups --no-editable "$@"
 
 
 FROM python:3.14-slim-bookworm AS runtime

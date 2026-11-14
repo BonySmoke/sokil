@@ -28,3 +28,7 @@ make help | grep cvat               # see available commands for CVAT
 4. Bump `cvat-sdk` python package version in `pyproject.toml`.
 5. `make cvat-pull && make cvat-up`. The server migrates its own database on start.
 Watch logs using `make cvat-logs` to spot errors.
+
+## Hailo compiler
+
+Optional maintainer tooling: compiles the shuttle and court models to Hailo HEF, locally or on an AWS spot GPU. For using it, see [Accelerators](../docs/accelerators.md#hailo).

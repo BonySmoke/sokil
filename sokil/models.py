@@ -3,10 +3,24 @@ The YOLO models the pipeline infers with.
 
 One class per task, so callers ask for the shape they want — a box, a set of
 polygons, a set of keypoints — rather than reaching into a raw result.
+
+A model holds its device only while it is loaded. An accelerator such as a
+Hailo-8 serves one model at a time, and a small GPU may fit only one, so each
+stage loads its models on the way in and releases them on the way out:
+
+    with Segmenter(path) as segmenter:   # loads and warms up, before any frame
+        segmenter.polygons(frame)
+                                         # released here
+
+Used without `with`, a model loads on its first prediction and keeps its device.
 """
 
+import gc
 import logging
+import sys
+import time
 from pathlib import Path
+from typing import Self
 
 import numpy as np
 
@@ -25,13 +39,70 @@ class Model:
         device: str | None = None,
         imgsz: int = 640,
     ):
-        from ultralytics import YOLO
-
         self.model_path = str(model_path)
         self.confidence = confidence
         self.device = device
         self.imgsz = imgsz
-        self.model = YOLO(self.model_path, task=self.task)
+        self._model = None
+
+        # What sokil.timing reports: loads include the warm-up frame, and
+        # inferences time the predict call alone.
+        self.loads = 0
+        self.load_seconds = 0.0
+        self.inferences = 0
+        self.inference_seconds = 0.0
+
+    @property
+    def model(self):
+        """The YOLO model, loaded on first use if load() was not called."""
+        if self._model is None:
+            from ultralytics import YOLO
+
+            logger.debug("Loading %s", self.model_path)
+            self._model = YOLO(self.model_path, task=self.task)
+        return self._model
+
+    @property
+    def loaded(self) -> bool:
+        return self._model is not None
+
+    def load(self) -> Self:
+        """
+        Load the model and run one blank frame through it.
+
+        Ultralytics sets up an exported model only on
+        its first prediction, so run a blank prediction for faster predictions on real data
+        """
+        if not self.loaded:
+            started = time.perf_counter()
+            self._predict(np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8))
+            self.loads += 1
+            self.load_seconds += time.perf_counter() - started
+        return self
+
+    def release(self) -> None:
+        """
+        Give the device back for the next model.
+
+        Ultralytics' Hailo backend closes its device when it is collected, and
+        torch keeps freed GPU memory cached until asked to return it.
+        """
+        if not self.loaded:
+            return
+
+        logger.debug("Releasing %s", self.model_path)
+        self._model = None
+        gc.collect()
+
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def __enter__(self) -> Self:
+        return self.load()
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
 
     def predict(self, image: np.ndarray, confidence: float | None = None):
         """
@@ -40,6 +111,14 @@ class Model:
         The frame is passed as a numpy array, which YOLO reads as BGR — the same
         order OpenCV decodes into — so no colour conversion is needed here.
         """
+        model = self.model
+        started = time.perf_counter()
+        result = self._predict(image, confidence, model)
+        self.inferences += 1
+        self.inference_seconds += time.perf_counter() - started
+        return result
+
+    def _predict(self, image: np.ndarray, confidence: float | None = None, model=None):
         kwargs = {
             "conf": self.confidence if confidence is None else confidence,
             "imgsz": self.imgsz,
@@ -49,7 +128,7 @@ class Model:
         if self.device:
             kwargs["device"] = self.device
 
-        results = self.model.predict(image, **kwargs)
+        results = (model or self.model).predict(image, **kwargs)
         return results[0] if results else None
 
     def __repr__(self) -> str:

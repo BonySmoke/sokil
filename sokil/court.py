@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Self
 
 import cv2
 import numpy as np
@@ -1629,6 +1630,18 @@ class CourtSolver:
         # index into sampled_frame_numbers of the frame the homography was
         # solved on (the least occluded one), None until a court is solved
         self.solved_on_index: int | None = None
+
+    def __enter__(self) -> Self:
+        """
+        Load the segmenter before the first sampled frame; see sokil.models.
+
+        A keypoint model, if one is given, is left to load on first use.
+        """
+        self.court_detector_kwargs["segmentation_model"].load()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.court_detector_kwargs["segmentation_model"].release()
 
     def solve(self, source) -> "Court | None":
         """

@@ -8,12 +8,16 @@ cannot change what these tests see.
 """
 
 import hashlib
+import io
+import tarfile
 
 import pytest
 import requests
 
 from sokil import settings
+from sokil.archive import pack_directory, sha256
 from sokil.settings import (
+    ModelFormat,
     ModelName,
     ModelResolutionError,
     ModelSpec,
@@ -32,7 +36,6 @@ from sokil.settings import (
     release_asset_digests,
     resolve_model_path,
     search_paths,
-    sha256,
 )
 
 MANIFEST = """
@@ -46,6 +49,10 @@ models:
     expects:
       imgsz: 640
       grayscale: true
+    formats:
+      hailo8:
+        asset: shuttle-detect-hailo8_hailo_model.tar.gz
+        sha256: {hailo_sha}
   court:
     version: "v3"
     release_tag: models-v3
@@ -56,11 +63,32 @@ models:
 SHUTTLE_BYTES = b"shuttle weights"
 SHUTTLE_SHA = hashlib.sha256(SHUTTLE_BYTES).hexdigest()
 
+HAILO_DIRECTORY = "shuttle-detect-hailo8_hailo_model"
+
+
+def archive(*members: tuple[str, bytes]) -> bytes:
+    """A .tar.gz holding the given (name, content) files."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+        for name, content in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            bundle.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
+HAILO_BYTES = archive(
+    (f"{HAILO_DIRECTORY}/train-hailo8.hef", b"hef"),
+    (f"{HAILO_DIRECTORY}/metadata.yaml", b"task: detect"),
+)
+HAILO_SHA = hashlib.sha256(HAILO_BYTES).hexdigest()
+
 SOKIL_VARIABLES = (
     "SOKIL_MODELS_MANIFEST",
     "SOKIL_MODELS_REPO",
     "SOKIL_MODELS_DIR",
     "SOKIL_CACHE_DIR",
+    "SOKIL_MODEL_FORMAT",
     "MODEL_DIR",
 )
 
@@ -82,7 +110,9 @@ def isolated_environment(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     manifest_file = tmp_path / "models.yaml"
-    manifest_file.write_text(MANIFEST.format(shuttle_sha=SHUTTLE_SHA))
+    manifest_file.write_text(
+        MANIFEST.format(shuttle_sha=SHUTTLE_SHA, hailo_sha=HAILO_SHA)
+    )
     monkeypatch.setenv("SOKIL_MODELS_MANIFEST", str(manifest_file))
     monkeypatch.setenv("SOKIL_CACHE_DIR", str(tmp_path / "cache"))
     # the checkout's own models/ directory is outside the tests' control
@@ -223,7 +253,9 @@ class TestModelSpec:
     def test_bumping_the_version_is_a_cache_miss(self, isolated_environment):
         before = model_spec("shuttle").cache_path
         isolated_environment.write_text(
-            MANIFEST.format(shuttle_sha=SHUTTLE_SHA).replace('"v3"', '"v4"', 1)
+            MANIFEST.format(shuttle_sha=SHUTTLE_SHA, hailo_sha=HAILO_SHA).replace(
+                '"v3"', '"v4"', 1
+            )
         )
         _load_manifest.cache_clear()
 
@@ -565,3 +597,143 @@ class TestWorkingDirectoryWeights:
         monkeypatch.setenv("SOKIL_MODELS_DIR", str(explicit))
 
         assert resolve_model_path("shuttle") == explicit / "shuttle-detect.pt"
+
+
+class TestFormats:
+    """A model pinned as an accelerator build, picked by SOKIL_MODEL_FORMAT."""
+
+    @pytest.fixture
+    def hailo(self, monkeypatch):
+        monkeypatch.setenv("SOKIL_MODEL_FORMAT", "hailo8")
+
+    def test_the_weights_are_the_default_format(self):
+        spec = model_spec("shuttle")
+
+        assert spec.format == "pt"
+        assert spec.asset == "shuttle-detect.pt"
+
+    def test_the_environment_picks_a_format(self, hailo):
+        spec = model_spec("shuttle")
+
+        assert spec.asset == f"{HAILO_DIRECTORY}.tar.gz"
+        assert spec.sha256 == HAILO_SHA
+        # the format is published with the weights it was built from
+        assert spec.release_tag == "models-v3"
+        assert spec.expects == {"imgsz": 640, "grayscale": True}
+
+    def test_an_explicit_format_wins_over_the_environment(self, hailo):
+        assert model_spec("shuttle", "pt").asset == "shuttle-detect.pt"
+
+    def test_an_unknown_format_in_the_environment_lists_the_known_ones(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("SOKIL_MODEL_FORMAT", "haillo8")
+
+        with pytest.raises(ModelResolutionError, match="pt, hailo8, hailo8l"):
+            model_spec("shuttle")
+
+    def test_an_unknown_format_in_the_manifest_is_reported_on_load(
+        self, isolated_environment
+    ):
+        isolated_environment.write_text(
+            MANIFEST.format(shuttle_sha=SHUTTLE_SHA, hailo_sha=HAILO_SHA).replace(
+                "      hailo8:", "      haillo8:"
+            )
+        )
+        _load_manifest.cache_clear()
+
+        with pytest.raises(ModelResolutionError, match="'haillo8'"):
+            manifest()
+
+    def test_the_weights_are_not_a_format_of_their_own(self, isolated_environment):
+        isolated_environment.write_text(
+            MANIFEST.format(shuttle_sha=SHUTTLE_SHA, hailo_sha=HAILO_SHA).replace(
+                "      hailo8:", "      pt:"
+            )
+        )
+        _load_manifest.cache_clear()
+
+        with pytest.raises(ModelResolutionError, match="pt under formats"):
+            manifest()
+
+    def test_a_spec_carries_the_enum(self, hailo):
+        assert model_spec("shuttle").format is ModelFormat.HAILO8
+
+    def test_a_format_the_manifest_does_not_pin_is_reported(self, hailo):
+        with pytest.raises(ModelResolutionError, match="no hailo8 build of 'court'"):
+            model_spec("court")
+
+    def test_an_archive_resolves_to_the_directory_it_unpacks_to(self, hailo):
+        spec = model_spec("shuttle")
+
+        assert spec.is_archive
+        assert spec.local_name == HAILO_DIRECTORY
+        assert spec.cache_model_path == spec.cache_path.with_name(HAILO_DIRECTORY)
+        assert str(spec) == "shuttle v3 (hailo8)"
+
+    def test_a_local_directory_is_found(self, hailo, tmp_path):
+        local = tmp_path / "models" / HAILO_DIRECTORY
+        local.mkdir(parents=True)
+
+        assert resolve_model_path("shuttle") == local
+
+    def test_a_file_of_the_directory_name_is_not_taken_for_it(self, hailo, tmp_path):
+        (tmp_path / "models").mkdir()
+        (tmp_path / "models" / HAILO_DIRECTORY).write_bytes(b"not a directory")
+
+        with pytest.raises(ModelResolutionError):
+            resolve_model_path("shuttle")
+
+    def test_a_download_is_verified_and_unpacked(self, hailo, fake_get):
+        fake_get(FakeResponse(chunks=[HAILO_BYTES]))
+
+        path = download_model("shuttle")
+
+        assert path == model_spec("shuttle").cache_model_path
+        assert (path / "train-hailo8.hef").read_bytes() == b"hef"
+        assert resolve_model_path("shuttle") == path
+
+    def test_an_unpacked_download_is_not_fetched_again(self, hailo, fake_get):
+        calls = fake_get(FakeResponse(chunks=[HAILO_BYTES]))
+        download_model("shuttle")
+
+        ensure_model_path("shuttle")
+
+        assert len(calls) == 1
+
+    def test_an_archive_with_anything_else_is_refused(
+        self, hailo, fake_get, isolated_environment
+    ):
+        stray = archive(
+            (f"{HAILO_DIRECTORY}/train-hailo8.hef", b"hef"), ("elsewhere.txt", b"x")
+        )
+        isolated_environment.write_text(
+            MANIFEST.format(
+                shuttle_sha=SHUTTLE_SHA, hailo_sha=hashlib.sha256(stray).hexdigest()
+            )
+        )
+        _load_manifest.cache_clear()
+        fake_get(FakeResponse(chunks=[stray]))
+
+        with pytest.raises(ModelResolutionError, match="elsewhere.txt"):
+            download_model("shuttle")
+
+    def test_a_packaged_directory_is_what_a_download_unpacks(
+        self, hailo, fake_get, isolated_environment, tmp_path
+    ):
+        build = tmp_path / "train-hailo8_hailo_model"
+        build.mkdir()
+        (build / "train-hailo8.hef").write_bytes(b"hef")
+        (build / ".hidden").write_bytes(b"left by a file browser")
+
+        packaged = pack_directory(build, tmp_path / f"{HAILO_DIRECTORY}.tar.gz")
+        isolated_environment.write_text(
+            MANIFEST.format(shuttle_sha=SHUTTLE_SHA, hailo_sha=sha256(packaged))
+        )
+        _load_manifest.cache_clear()
+        fake_get(FakeResponse(chunks=[packaged.read_bytes()]))
+
+        path = download_model("shuttle")
+
+        assert path.name == HAILO_DIRECTORY
+        assert sorted(child.name for child in path.iterdir()) == ["train-hailo8.hef"]

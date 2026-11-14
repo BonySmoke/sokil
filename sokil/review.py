@@ -13,6 +13,7 @@ from .frame import ShuttleTrack
 from .hits import HitDetectionConfig, HitDetector, HitJudge, HitResult, detect_hits
 from .render import RenderConfig, ReviewRenderer
 from .report import Analytics, StatsExporter
+from .timing import RunStats
 from .tracker import ShuttleTracker, TrackerConfig
 from .util import Undistorter
 from .video import VideoSource
@@ -79,6 +80,9 @@ class Review:
 
         self._source: VideoSource | None = None
 
+        # how long each stage took; see run_stats()
+        self.stats = RunStats()
+
     @property
     def source(self) -> VideoSource:
         """The video, opened lazily and re-read by every pass that needs it."""
@@ -114,9 +118,9 @@ class Review:
         return Undistorter(K, dist)
 
     def preprocess(self):
-        """Detect the shuttle on every frame, then establish the session court."""
-        self.tracks = self.tracker.track(self.source)
-
+        """
+        Establish the session court, then detect the shuttle on every frame.
+        """
         if self.court_homography is not None:
             logger.info("Using the supplied court homography (not solving)")
             self.court = Court.from_homography(
@@ -125,9 +129,16 @@ class Review:
                     "court_config"
                 ),
             )
-            return
+        else:
+            with self.stats.stage("court solve") as stage, self.court_solver:
+                self.court = self.court_solver.solve(self.source)
+                stage.frames = len(
+                    getattr(self.court_solver, "sampled_frame_numbers", [])
+                )
 
-        self.court = self.court_solver.solve(self.source)
+        with self.stats.stage("tracking") as stage, self.tracker:
+            self.tracks = self.tracker.track(self.source)
+            stage.frames = getattr(self.tracker, "frames_processed", None)
 
     def set_frame_hit_candidates(self, config: HitDetectionConfig | None = None):
         """
@@ -137,25 +148,51 @@ class Review:
             search sweep params without rebuilding the Review).
         :returns: indices of the accepted hit tracks.
         """
-        self.hit_result = self.hit_detector.detect(
-            self.tracks, self.court, self.fps, config, frame_width=self.frame_width
-        )
+        with self.stats.stage("hit detection"):
+            self.hit_result = self.hit_detector.detect(
+                self.tracks, self.court, self.fps, config, frame_width=self.frame_width
+            )
         self.trajectories = self.hit_result.trajectories
         return self.hit_result.hit_indices
 
     def set_hit_positions(self):
         """For every hit, estimate whether it was IN or OUT of the court."""
-        return self.hit_judge.judge(self.tracks, self.court)
+        with self.stats.stage("in/out judging"):
+            return self.hit_judge.judge(self.tracks, self.court)
 
     def set_track_points(self):
         """Based on the trajectories, set the drawable track points."""
         self.renderer.assign_track_points(self.tracks, self.trajectories)
 
     def video_to_file(self, output_path: str):
-        """Store the review video to the file."""
-        self.renderer.render(
-            self.source, self.tracks, self.court, output_path, self._explainer()
-        )
+        """
+        Store the review video to the file.
+        """
+        explainer = self._explainer()
+        with self.stats.stage("render") as stage:
+            if explainer is None:
+                stage.frames = self.renderer.render(
+                    self.source, self.tracks, self.court, output_path
+                )
+                return
+
+            with self.court_solver:
+                stage.frames = self.renderer.render(
+                    self.source, self.tracks, self.court, output_path, explainer
+                )
+
+    def run_stats(self) -> RunStats:
+        """
+        The run's stats, with what each model measured about itself: the court
+        models across the solve and an explained render, the detector across
+        tracking.
+        """
+        self.stats.models = []
+        court_models = self.court_solver.court_detector_kwargs
+        self.stats.add_model("segmenter", court_models.get("segmentation_model"))
+        self.stats.add_model("keypoints", court_models.get("keypoint_model"))
+        self.stats.add_model("detector", getattr(self.tracker, "detector", None))
+        return self.stats
 
     def _explainer(self) -> "Explainer | None":
         if not self.renderer.config.explain:

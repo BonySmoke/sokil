@@ -43,6 +43,11 @@ dev = [
     "cvat-sdk==2.75.0", # keep it in sync with the actual CVAT instance deployed in infra
 ]
 
+# What the Hailo compile image installs into the AI Software Suite, at the
+# versions locked here (see infra/hailo/image/install.sh). Only these direct
+# pins carry over: the suite brings its own Python and the rest of the stack.
+hailo = ["ultralytics>=8.4.127", "onnxslim>=0.1.98"]
+
 lint = ["ruff==0.16.6"]
 
 test = ["pytest>=8.4", "pytest-cov>=7.0"]

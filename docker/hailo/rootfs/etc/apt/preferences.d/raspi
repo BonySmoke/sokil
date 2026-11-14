@@ -1,0 +1,10 @@
+Explanation: Only HailoRT comes from Raspberry Pi's repository, which also
+Explanation: carries its own builds of common libraries; everything else stays
+Explanation: Debian's.
+Package: *
+Pin: origin archive.raspberrypi.com
+Pin-Priority: -1
+
+Package: hailort python3-hailort
+Pin: origin archive.raspberrypi.com
+Pin-Priority: 500

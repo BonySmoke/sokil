@@ -88,6 +88,10 @@ uv run sokil models pin --tag models-2026-09-06 \
 
 Paste the output into `sokil/models.yaml`, keeping its comments, and commit it.
 
+## 6. Compile for an accelerator (optional)
+
+See [accelerators.md](accelerators.md), e.g. to compile for Hailo.
+
 ## Versioning
 
 `sokil/models.yaml` is the single source of truth for which weights a given

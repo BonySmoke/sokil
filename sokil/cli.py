@@ -6,6 +6,7 @@ import typer
 from rich.logging import RichHandler
 
 from sokil.court import CourtCameraMode, CourtConfig, CourtModelType
+from sokil.settings import ModelFormat
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi"}
 
@@ -111,15 +112,31 @@ def review(
         bool,
         typer.Option(help="Explain the stages of the review visually"),
     ] = False,
+    stats_path: Annotated[
+        str | None,
+        typer.Option(
+            help="Also write the run stats (time per stage, model load times "
+            "and fps) to this JSON file"
+        ),
+    ] = None,
     verbose: Annotated[
         bool, typer.Option(help="Enable debug logging (per-hit verdicts, etc.)")
     ] = False,
 ):
+    # Imported here rather than by the first model load, so the run stats count
+    # it, torch with it, as startup.
+    import ultralytics  # noqa: F401
+    from rich.console import Console
+
     from sokil.court import CourtSolverConfig, load_homography, save_homography
     from sokil.models import PoseEstimator, Segmenter
     from sokil.render import RenderConfig
     from sokil.review import Review
-    from sokil.settings import ModelName, ensure_model_path, model_spec
+    from sokil.settings import (
+        ModelName,
+        ensure_model_path,
+        model_spec,
+    )
 
     configure_logging(verbose)
 
@@ -142,8 +159,10 @@ def review(
     # The weights declare the frames they were trained on, so the pipeline
     # honours that instead of assuming. A pair that disagrees can only be fed
     # one way, so the shuttle detector wins: it is the one that runs per frame.
-    shuttle_expects = model_spec(ModelName.SHUTTLE).expects
-    court_expects = model_spec(ModelName.COURT).expects
+    # The same in every format, so read without one: a model given by path
+    # needs no pinned build in SOKIL_MODEL_FORMAT.
+    shuttle_expects = model_spec(ModelName.SHUTTLE, ModelFormat.PT).expects
+    court_expects = model_spec(ModelName.COURT, ModelFormat.PT).expects
 
     court_segmentation_model = Segmenter(
         court_segmentation_model_path, imgsz=court_expects.get("imgsz", 640)
@@ -181,6 +200,7 @@ def review(
         court_solver_config=CourtSolverConfig(sample_seconds=court_sample_seconds),
     )
 
+    review.stats.start()
     review.preprocess()
 
     if save_court_homography_path:
@@ -195,6 +215,12 @@ def review(
     review.set_track_points()
 
     review.video_to_file(output_path)
+
+    stats = review.run_stats()
+    Console().print(stats.table())
+    if stats_path:
+        stats.write(stats_path)
+        logging.getLogger(__name__).info("Run stats written -> %s", stats_path)
 
 
 @models_app.command("download")
@@ -293,12 +319,8 @@ def models_pin(
     """
     from pathlib import Path
 
-    from sokil.settings import (
-        model_names,
-        model_spec,
-        release_asset_digests,
-        sha256,
-    )
+    from sokil.archive import sha256
+    from sokil.settings import model_names, model_spec, release_asset_digests
 
     configure_logging(verbose)
 
@@ -321,12 +343,12 @@ def models_pin(
             path = Path(raw_path)
             if not path.is_file():
                 raise typer.BadParameter(f"No such file: {path}")
-            digests[model_spec(name.strip()).asset] = sha256(path)
+            digests[model_spec(name.strip(), ModelFormat.PT).asset] = sha256(path)
 
     typer.echo("models:")
     exit_code = 0
     for name in model_names():
-        spec = model_spec(name)
+        spec = model_spec(name, ModelFormat.PT)
         digest = digests.get(spec.asset)
         if digest is None:
             typer.echo(f"  # {name}: no checksum for {spec.asset}", err=True)
@@ -346,6 +368,91 @@ def models_pin(
 
     if exit_code:
         raise typer.Exit(code=exit_code)
+
+
+@models_app.command("publish")
+def models_publish(
+    format: Annotated[ModelFormat, typer.Option(help="The target the builds are for")],
+    model: Annotated[
+        list[str],
+        typer.Option(
+            help="model directory e.g. shuttle=training/shuttle/hailo/train-hailo8_hailo_model"
+        ),
+    ],
+    dry_run: Annotated[
+        bool, typer.Option(help="Pack and print without uploading")
+    ] = False,
+    verbose: Annotated[bool, typer.Option(help="Enable debug logging")] = False,
+):
+    """
+    Publish builds of the pinned weights to their release.
+
+    Each directory is uploaded as <weights>-<format>_..._model.tar.gz to the
+    release models.yaml pins for the model, which must be the weights it was
+    built from.
+    Prints the formats entries to add to models.yaml.
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from sokil.archive import pack_directory, sha256
+    from sokil.settings import model_spec
+
+    configure_logging(verbose)
+
+    if format == ModelFormat.PT:
+        raise typer.BadParameter("The weights are published by make models-release")
+
+    builds = []
+    for pair in model:
+        name, separator, raw_path = pair.partition("=")
+
+        if not separator:
+            raise typer.BadParameter(f"Expected model=directory, got {pair!r}")
+        if not raw_path:
+            continue
+
+        directory = Path(raw_path)
+
+        if not directory.is_dir():
+            raise typer.BadParameter(f"No such directory: {directory}")
+
+        # Ultralytics names an export <stem>-<format>_<kind>_model, e.g.
+        # train-hailo8_hailo_model, and finds its format by that suffix.
+        _, marker, suffix = directory.name.partition(f"-{format.value}_")
+        if not marker:
+            raise typer.BadParameter(
+                f"{directory} is not named as a {format.value} build"
+            )
+        builds.append((model_spec(name.strip(), ModelFormat.PT), directory, suffix))
+
+    if not builds:
+        raise typer.BadParameter("No directories given")
+
+    entries = []
+    with tempfile.TemporaryDirectory() as staging:
+        for spec, directory, suffix in builds:
+            asset = f"{Path(spec.asset).stem}-{format.value}_{suffix}.tar.gz"
+            archive = pack_directory(directory, Path(staging) / asset)
+
+            if not dry_run:
+                typer.echo(f"Uploading {asset} to {spec.release_tag}")
+                subprocess.run(
+                    ["gh", "release", "upload", spec.release_tag, str(archive)],
+                    check=True,
+                )
+
+            entries += [
+                f"  {spec.name}:",
+                "    formats:",
+                f"      {format.value}:",
+                f"        asset: {asset}",
+                f'        sha256: "{sha256(archive)}"',
+            ]
+
+    typer.echo("Add these to their models in sokil/models.yaml:")
+    typer.echo("\n".join(entries))
 
 
 @models_app.command("export-onnx")
@@ -375,7 +482,7 @@ def models_export_onnx(
         raise typer.BadParameter(f"No such file: {path}")
 
     try:
-        spec = model_spec(model)
+        spec = model_spec(model, ModelFormat.PT)
     except ModelResolutionError as error:
         raise typer.BadParameter(str(error))
 

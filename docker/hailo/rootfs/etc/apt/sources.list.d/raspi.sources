@@ -1,0 +1,11 @@
+# Raspberry Pi's repository, for HailoRT: the same packages the host runs.
+# preferences.d/raspi limits it to those, as it also carries its own builds of
+# common libraries.
+#
+# Signed-By names the key for this repository alone, rather than trusting it for
+# every repository through trusted.gpg.d.
+Types: deb
+URIs: http://archive.raspberrypi.com/debian/
+Suites: trixie
+Components: main
+Signed-By: /usr/share/keyrings/raspberrypi-archive-keyring.pgp

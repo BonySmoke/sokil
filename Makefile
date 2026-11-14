@@ -24,12 +24,16 @@ cvat = $(COMPOSE) -f $(CVAT_COMPOSE) $(cvat_share_overlay) --env-file $(CVAT_ENV
 # --- Application image -------------------------------------------------------
 IMAGE ?= sokil:dev
 PLATFORMS ?= linux/amd64,linux/arm64
+# Dependency groups to add to an image, space separated, e.g.
+# make build-hailo GROUPS=dataset HAILO_BUILD_IMAGE=sokil-hailo:eval for an
+# image that can run `sokil evaluate`.
+GROUPS ?=
+groups_arg = $(if $(strip $(GROUPS)),--build-arg UV_GROUPS="$(GROUPS)")
 
 # the release tag to publish to, e.g. make models-release MODELS_TAG=models-2026-09-06
 MODELS_TAG ?=
 
-# Required by models-release, deliberately without defaults: trained weights
-# live wherever the training run left them, which is particular to each machine.
+# Required by models-release, hailo-local and hailo-cloud compile
 SHUTTLE_WEIGHTS ?=
 COURT_WEIGHTS ?=
 
@@ -47,6 +51,18 @@ mounts = -v "$(PWD)":/data -v "$(MODELS_VOLUME)":/cache
 # when there is no terminal to attach, e.g. under CI.
 tty_flag = $$([ -t 1 ] && echo -t)
 docker_run = docker run --rm $(tty_flag) $(mounts) --user $(UID):$(GID) $(IMAGE)
+
+# --- Hailo image (Raspberry Pi with a Hailo accelerator) ---------------------
+HAILO_BUILD_IMAGE ?= sokil-hailo:dev
+HAILO_REVIEW_IMAGE ?= ghcr.io/bonysmoke/sokil:latest-hailo
+HAILO_DEVICE ?= /dev/hailo0
+# The host's HailoRT, which the image's must match (see docker/hailo/README.md);
+# left unset, the Dockerfile's own versions are built.
+HAILORT_VERSION ?=
+PYHAILORT_VERSION ?=
+
+hailort_args = $(if $(HAILORT_VERSION),--build-arg HAILORT_VERSION=$(HAILORT_VERSION)) \
+	$(if $(PYHAILORT_VERSION),--build-arg PYHAILORT_VERSION=$(PYHAILORT_VERSION))
 
 .DEFAULT_GOAL := help
 
@@ -70,13 +86,19 @@ test-unit:  ## Run the unit tests with coverage, as CI does
 	uv run pytest --cov --cov-report=term-missing
 
 build:  ## Build the application image for this machine
-	docker buildx build -t $(IMAGE) .
+	docker buildx build -f docker/cpu/Dockerfile $(groups_arg) -t $(IMAGE) .
 
 build-multi-arch:  ## Build a multi-arch image
-	docker buildx build --platform $(PLATFORMS) -t $(IMAGE) .
+	docker buildx build -f docker/cpu/Dockerfile --platform $(PLATFORMS) $(groups_arg) -t $(IMAGE) .
+
+build-hailo:  ## Build the Hailo image for a Raspberry Pi (linux/arm64), e.g. make build-hailo HAILORT_VERSION=4.23.0
+	docker buildx build -f docker/hailo/Dockerfile --platform linux/arm64 --load $(hailort_args) $(groups_arg) -t $(HAILO_BUILD_IMAGE) .
 
 review:  ## Run a review in the container, e.g. make review ARGS="--video-path a.mp4 --output-path b.mp4"
 	$(docker_run) review $(ARGS)
+
+review-hailo:  ## Run a review on a Hailo accelerator, e.g. make review-hailo ARGS="--video-path a.mp4 --output-path b.mp4 …"
+	docker run --rm $(tty_flag) --device $(HAILO_DEVICE) $(mounts) --user $(UID):$(GID) $(HAILO_REVIEW_IMAGE) review $(ARGS)
 
 shell:  ## Open a shell in the application image
 	docker run --rm -it $(mounts) --user $(UID):$(GID) --entrypoint bash $(IMAGE)
@@ -102,3 +124,5 @@ cvat-pull: cvat-env  ## Pull the images for the pinned CVAT_VERSION
 
 cvat-superuser: cvat-env  ## Create the admin user
 	$(cvat) exec cvat_server bash -ic 'python3 ~/manage.py createsuperuser'
+
+include infra/hailo/hailo.mk
