@@ -8,7 +8,6 @@ quote.
 
 import logging
 from dataclasses import dataclass
-from itertools import pairwise
 
 import numpy as np
 
@@ -19,10 +18,11 @@ logger = logging.getLogger(__name__)
 # match, which is what makes a recall figure worth anything.
 MATCH_WINDOW_FRAMES = 2
 
-# The court's length is divided here when errors are reported by distance.
-# Perspective stretches a pixel with distance, so a single average over the
-# whole court blends two regimes that differ by more than tenfold.
-DISTANCE_BANDS_M = (3.0, 6.0, 9.0)
+# How many strips the court's length is cut into when landings are reported by
+# how far they fell from the camera. Perspective stretches a pixel with
+# distance, so a single average over the whole court blends regimes that
+# differ severalfold; more strips than this leave too few landings in each.
+PROXIMITY_BINS = 4
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ def position_errors(
     pairs: list[tuple[tuple[float, float], tuple[float, float]]],
 ) -> dict:
     """
-    Landing position error in centimetres, overall and by distance.
+    Landing position error in centimetres.
 
     :param pairs: (detected, labelled) positions in court metres.
 
@@ -133,31 +133,83 @@ def position_errors(
     here — which is also why this figure must never be quoted without it.
     """
     if not pairs:
-        return {"count": 0, "median_cm": None, "p90_cm": None, "by_distance": {}}
+        return {"count": 0, "median_cm": None, "p90_cm": None}
 
-    detected = np.array([p[0] for p in pairs], dtype=float)
-    labelled = np.array([p[1] for p in pairs], dtype=float)
-    errors = np.linalg.norm(detected - labelled, axis=1) * 100
-
-    bands = {}
-    edges = (0.0, *DISTANCE_BANDS_M, float("inf"))
-    for low, high in pairwise(edges):
-        in_band = (labelled[:, 1] >= low) & (labelled[:, 1] < high)
-        if not in_band.any():
-            continue
-        label = f"{low:.0f}-{high:.0f} m" if high != float("inf") else f"{low:.0f}+ m"
-        bands[label] = {
-            "count": int(in_band.sum()),
-            "median_cm": round(float(np.median(errors[in_band])), 1),
-            "max_cm": round(float(errors[in_band].max()), 1),
-        }
+    errors = [position_error_cm(detected, labelled) for detected, labelled in pairs]
 
     return {
         "count": len(errors),
         "median_cm": round(float(np.median(errors)), 1),
         "p90_cm": round(float(np.percentile(errors, 90)), 1),
-        "by_distance": bands,
     }
+
+
+def position_error_cm(
+    detected: tuple[float, float], labelled: tuple[float, float]
+) -> float:
+    """How far one landing was placed from where it was labelled, in cm."""
+    return float(np.linalg.norm(np.subtract(detected, labelled))) * 100
+
+
+def strip_of(y_m: float, length_m: float, bins: int = PROXIMITY_BINS) -> int:
+    """
+    Which strip across the court a landing at y_m falls in.
+
+    A landing past either baseline belongs to the end strip it overshot: an
+    out call lands just beyond the line and is as far from the camera as the
+    in calls beside it.
+    """
+    strip = int(y_m / length_m * bins)
+    return min(max(strip, 0), bins - 1)
+
+
+def proximity_ranks(rows: list[float]) -> list[int]:
+    """
+    Each strip's rank by closeness to the camera, 0 being the nearest.
+
+    :param rows: the image row each strip's centre projects to. On a flat floor
+        seen from above, nearer ground sits lower in the frame, so the lowest
+        strip is the nearest whatever end of the court the camera stands at.
+    """
+    order = sorted(range(len(rows)), key=lambda strip: rows[strip], reverse=True)
+    ranks = [0] * len(rows)
+    for rank, strip in enumerate(order):
+        ranks[strip] = rank
+    return ranks
+
+
+def by_proximity(landings: list[dict], bins: int = PROXIMITY_BINS) -> list[dict]:
+    """
+    Recall and position error per strip, nearest to the camera first.
+
+    :param landings: one per labelled landing, carrying its `proximity` rank
+        (None where its clip's court could not be ranked), whether it was
+        `matched`, and its `error_cm` where it was placed.
+
+    Pooled from every landing rather than from per-clip figures: each strip
+    holds a few landings per clip, so only the pool has enough to read.
+    """
+    report = []
+    for rank in range(bins):
+        here = [landing for landing in landings if landing["proximity"] == rank]
+        matched = sum(1 for landing in here if landing["matched"])
+        errors = [
+            landing["error_cm"] for landing in here if landing["error_cm"] is not None
+        ]
+        report.append(
+            {
+                "proximity": rank,
+                "labelled": len(here),
+                "matched": matched,
+                "recall": round(matched / len(here), 4) if here else None,
+                "positions": len(errors),
+                "median_cm": round(float(np.median(errors)), 1) if errors else None,
+                "p90_cm": (
+                    round(float(np.percentile(errors, 90)), 1) if errors else None
+                ),
+            }
+        )
+    return report
 
 
 def verdict_counts(pairs: list[tuple[str, str]]) -> dict:

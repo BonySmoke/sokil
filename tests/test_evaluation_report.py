@@ -37,7 +37,6 @@ def clip_result(clip_id="clip_a", labelled=4, matched=3, missed=1, false_positiv
             "count": matched,
             "median_cm": 12.0,
             "p90_cm": 20.0,
-            "by_distance": {},
         },
         verdict_correctness={
             "count": matched,

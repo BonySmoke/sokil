@@ -19,18 +19,24 @@ from ..dataset.boxes import ShuttleBoxSource
 from ..dataset.court import (
     court_coordinates,
     court_from_points,
+    image_to_court_homography,
     reprojection_residuals,
 )
-from ..dataset.landing import CM_PER_M
+from ..dataset.landing import CM_PER_M, court_keyframe
 from ..hits import HitDetectionConfig, HitDetector, HitJudge
 from ..models import ShuttleDetector
 from ..tracker import ShuttleTracker, TrackerConfig
 from ..video import VideoSource
 from .metrics import (
     MATCH_WINDOW_FRAMES,
+    PROXIMITY_BINS,
+    by_proximity,
     detection_counts,
     match_landings,
+    position_error_cm,
     position_errors,
+    proximity_ranks,
+    strip_of,
     verdict_counts,
 )
 
@@ -58,6 +64,10 @@ class ClipResult:
     # False only where the court was solved from the video and the solve
     # failed, which makes every figure below it meaningless rather than bad.
     court_solved: bool = True
+    # One row per labelled landing, found or not, so figures that cut across
+    # clips — such as by distance from the camera — are pooled from landings
+    # rather than from per-clip summaries.
+    landings: list[dict] = field(default_factory=list)
 
 
 def _landings(tracks) -> dict[int, object]:
@@ -143,6 +153,7 @@ def run_clip(
         window,
         court,
         frames_tracked=len(shuttle_tracks),
+        strip_ranks=strip_proximity(court_points, clip_id),
     )
 
 
@@ -256,6 +267,7 @@ def _score(
     window: int,
     court,
     frames_tracked: int,
+    strip_ranks: list[int] | None = None,
 ) -> ClipResult:
     """
     Compare what the pipeline produced against what was labelled.
@@ -264,6 +276,8 @@ def _score(
         back through. Using the annotated court here instead would quietly
         excuse a solve that was wrong — or, where the solve failed outright,
         report distances for a court the run never had.
+    :param strip_ranks: each court strip's closeness to the camera, from the
+        annotated court; None leaves this clip's landings unranked.
     """
     labelled = events[events["clip_id"] == clip_id].set_index("frame")
     found = _landings(shuttle_tracks)
@@ -277,7 +291,7 @@ def _score(
     # is the claim the configuration actually makes.
     to_court = _court_reader(court)
 
-    positions, verdicts = [], []
+    positions, verdicts, errors = [], [], {}
     for match in matches:
         track = found[match.detected_frame]
         truth = labelled.loc[match.labelled_frame]
@@ -286,6 +300,9 @@ def _score(
             placed = to_court(*track.hit.position)
             if placed is not None and not pd.isna(truth["x_m"]):
                 positions.append((placed, (truth["x_m"], truth["y_m"])))
+                errors[match.labelled_frame] = round(
+                    position_error_cm(placed, (truth["x_m"], truth["y_m"])), 1
+                )
 
         if track.hit.is_in is not None:
             verdicts.append(("in" if track.hit.is_in else "out", truth["call"]))
@@ -313,7 +330,79 @@ def _score(
         court_error=_court_error(court_points, clip_id, court),
         frames_tracked=frames_tracked,
         court_solved=court is not None,
+        landings=_landing_rows(labelled, matches, errors, strip_ranks),
     )
+
+
+def _landing_rows(labelled, matches, errors, strip_ranks) -> list[dict]:
+    """One row per labelled landing: where it fell, and what became of it."""
+    matched = {match.labelled_frame for match in matches}
+    length_m = _court_length_m()
+
+    rows = []
+    for frame, truth in labelled.iterrows():
+        proximity = None
+        if strip_ranks is not None and not pd.isna(truth["y_m"]):
+            proximity = strip_ranks[strip_of(truth["y_m"], length_m, len(strip_ranks))]
+        rows.append(
+            {
+                "frame": int(frame),
+                "proximity": proximity,
+                "matched": frame in matched,
+                "error_cm": errors.get(frame),
+            }
+        )
+    return rows
+
+
+def strip_proximity(
+    court_points: pd.DataFrame, clip_id: str, bins: int = PROXIMITY_BINS
+) -> list[int] | None:
+    """
+    Each court strip's rank by closeness to the camera, from the annotated court.
+
+    The annotated court rather than the run's own, so every configuration
+    sorts a landing into the same strip and a bad solve moves errors, never
+    landings between strips.
+
+    None where the keypoints place no court, or where a strip's centre lies
+    behind the camera, where a homography's image row no longer orders the
+    floor by distance.
+    """
+    from ..court import CourtModel
+
+    keyframe = court_keyframe(court_points, clip_id, 0)
+    if keyframe is None:
+        return None
+    visible = keyframe[keyframe["visible"]]
+    pixels = visible[["x_px", "y_px"]].to_numpy(dtype=float)
+
+    image_to_court = image_to_court_homography(list(visible["vertex"]), pixels)
+    if image_to_court is None:
+        return None
+
+    court_to_image = np.linalg.inv(image_to_court)
+
+    model = CourtModel()
+    centres = np.array(
+        [
+            [model.width / 2, (strip + 0.5) * model.length / bins, 1.0]
+            for strip in range(bins)
+        ]
+    )
+    projected = centres @ court_to_image.T
+
+    # Ground the camera sees projects with one sign of the homogeneous scale;
+    # a strip with the other sign is behind the camera.
+    seen = np.sign((image_to_court @ np.array([*pixels[0], 1.0]))[2])
+    if np.any(np.sign(projected[:, 2]) != seen):
+        logger.warning(
+            "%s: part of the court lies behind the camera; not ranked by distance",
+            clip_id,
+        )
+        return None
+
+    return proximity_ranks(list(projected[:, 1] / projected[:, 2]))
 
 
 def _court_reader(court):
@@ -470,6 +559,9 @@ def summarise(results: list[ClipResult]) -> dict:
             ),
         },
         "court_error": _pooled_court_error(results),
+        "by_proximity": by_proximity(
+            [landing for result in results for landing in result.landings]
+        ),
     }
 
 
