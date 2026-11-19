@@ -14,7 +14,12 @@ import pytest
 
 from sokil.court import CourtCameraMode, CourtModelType
 from sokil.dataset.schema import columns
-from sokil.evaluation.run import CONFIGURATIONS, ground_truth_court, run_clip
+from sokil.evaluation.run import (
+    CONFIGURATIONS,
+    ground_truth_court,
+    run_clip,
+    strip_proximity,
+)
 
 HOMOGRAPHY = np.array([[1.6, 0.35, 240.0], [0.0, 0.55, 120.0], [0.0, 0.00045, 1.0]])
 VERTICES = [1, 5, 26, 30, 11, 15, 3, 28]
@@ -284,6 +289,55 @@ class TestRunClip:
         )
 
         assert result.court_solved is True
+
+
+class TestStripProximity:
+    def test_strips_are_ranked_by_how_low_they_sit_in_the_frame(self, court_points):
+        # The fixture's camera looks from the far baseline's end: court y grows
+        # down the frame, so the last strip is the nearest.
+        assert strip_proximity(court_points, "clip_a", bins=4) == [3, 2, 1, 0]
+
+    def test_a_clip_with_no_keypoints_is_left_unranked(self, court_points):
+        assert strip_proximity(court_points, "clip_ghost") is None
+
+    def test_every_labelled_landing_gets_a_row(self, clip, court_points):
+        clip_id, row, path = clip
+        events = pd.DataFrame(
+            [
+                {
+                    **dict.fromkeys(columns("events")),
+                    "clip_id": clip_id,
+                    "frame": 5,
+                    "call": "in",
+                    "x_m": 3.0,
+                    "y_m": 12.0,
+                },
+                {
+                    **dict.fromkeys(columns("events")),
+                    "clip_id": clip_id,
+                    "frame": 20,
+                    "call": "in",
+                    "x_m": 3.0,
+                    "y_m": 1.0,
+                },
+            ]
+        )
+
+        result = run_clip(
+            clip_id,
+            path,
+            row,
+            events,
+            court_points,
+            configuration="manual",
+            detector=ScriptedDetector({}),
+            court=ground_truth_court(clip_id, row, court_points),
+        )
+
+        assert [
+            (landing["frame"], landing["proximity"], landing["matched"])
+            for landing in result.landings
+        ] == [(5, 0, False), (20, 3, False)]
 
 
 class TestGroundTruthCourt:

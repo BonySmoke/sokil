@@ -1421,6 +1421,34 @@ def _echo_evaluation_table(results, totals):
             f"{verdict['called_out_was_in']} called out when in"
         )
 
+    _echo_proximity_table(totals["by_proximity"])
+
+
+def _echo_proximity_table(strips: list[dict]) -> None:
+    """Recall and position error by how far from the camera the landing fell."""
+    if not any(strip["labelled"] for strip in strips):
+        return
+
+    header = (
+        f"{'distance from camera':<22}{'landings':>9}{'matched':>9}{'recall':>9}"
+        f"{'positions':>11}{'position_error':>16}{'p90':>8}"
+    )
+    typer.echo("\n" + header)
+    typer.echo("-" * len(header))
+
+    last = len(strips) - 1
+    for strip in strips:
+        rank = strip["proximity"]
+        label = f"{rank + 1}" + (
+            " (nearest)" if rank == 0 else " (farthest)" if rank == last else ""
+        )
+        typer.echo(
+            f"{label:<22}{strip['labelled']:>9}{strip['matched']:>9}"
+            f"{_percentage(strip['recall']):>9}{strip['positions']:>11}"
+            f"{_centimetres(strip['median_cm']):>16}"
+            f"{_centimetres(strip['p90_cm']):>8}"
+        )
+
 
 def _pooled_court(court: dict) -> str:
     """The pooled court error, or a dash where no court could contribute one."""

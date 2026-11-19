@@ -10,9 +10,12 @@ landing would score perfectly.
 import pytest
 
 from sokil.evaluation.metrics import (
+    by_proximity,
     detection_counts,
     match_landings,
     position_errors,
+    proximity_ranks,
+    strip_of,
     verdict_counts,
 )
 
@@ -133,25 +136,64 @@ class TestPositionErrors:
 
         assert result["median_cm"] == pytest.approx(5.0, abs=0.1)
 
-    def test_errors_are_grouped_by_distance_along_the_court(self):
-        # Near the camera and far from it are different regimes, so an average
-        # over both describes neither.
-        result = position_errors(
-            [((1.0, 1.0), (1.01, 1.0)), ((1.0, 11.0), (1.30, 11.0))]
-        )
-
-        assert result["by_distance"]["0-3 m"]["median_cm"] == pytest.approx(
-            1.0, abs=0.1
-        )
-        assert result["by_distance"]["9+ m"]["median_cm"] == pytest.approx(
-            30.0, abs=0.1
-        )
-
     def test_nothing_found_reports_nothing_rather_than_zero(self):
         result = position_errors([])
 
         assert result["count"] == 0
         assert result["median_cm"] is None
+
+
+class TestStrips:
+    def test_the_court_is_cut_into_equal_strips_along_its_length(self):
+        assert [strip_of(y, 13.4, 4) for y in (0.1, 3.4, 6.8, 13.3)] == [0, 1, 2, 3]
+
+    def test_a_landing_past_a_baseline_belongs_to_the_end_strip(self):
+        # An out call lands just beyond the line, as far from the camera as
+        # the in calls beside it.
+        assert strip_of(-0.2, 13.4, 4) == 0
+        assert strip_of(13.6, 13.4, 4) == 3
+
+
+class TestProximityRanks:
+    def test_the_strip_lowest_in_the_frame_is_the_nearest(self):
+        assert proximity_ranks([400.0, 300.0, 200.0, 100.0]) == [0, 1, 2, 3]
+
+    def test_a_camera_at_the_other_end_reverses_the_order(self):
+        assert proximity_ranks([100.0, 200.0, 300.0, 400.0]) == [3, 2, 1, 0]
+
+
+class TestByProximity:
+    def test_recall_and_error_are_pooled_per_strip(self):
+        landings = [
+            {"proximity": 0, "matched": True, "error_cm": 2.0},
+            {"proximity": 0, "matched": True, "error_cm": 4.0},
+            {"proximity": 1, "matched": True, "error_cm": 20.0},
+            {"proximity": 1, "matched": False, "error_cm": None},
+        ]
+
+        near, far = by_proximity(landings, bins=2)
+
+        assert (near["labelled"], near["recall"], near["median_cm"]) == (2, 1.0, 3.0)
+        assert (far["labelled"], far["recall"], far["median_cm"]) == (2, 0.5, 20.0)
+
+    def test_a_found_landing_with_no_position_counts_for_recall_only(self):
+        (strip,) = by_proximity(
+            [{"proximity": 0, "matched": True, "error_cm": None}], bins=1
+        )
+
+        assert (strip["recall"], strip["positions"], strip["median_cm"]) == (
+            1.0,
+            0,
+            None,
+        )
+
+    def test_unranked_landings_are_left_out(self):
+        (strip,) = by_proximity(
+            [{"proximity": None, "matched": True, "error_cm": 1.0}], bins=1
+        )
+
+        assert strip["labelled"] == 0
+        assert strip["recall"] is None
 
 
 class TestVerdictCounts:
