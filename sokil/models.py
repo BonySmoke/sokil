@@ -314,8 +314,10 @@ class HailoShuttleDetector(Model):
         self._input_size = tuple(input_info.shape[:2])
         self._output_name = hef.get_output_vstream_infos()[0].name
 
+        # A whole batch: a multi-context network only accepts multiples of
+        # the batch size it was configured for.
         height, width = self._input_size
-        self._infer([np.zeros((height, width, 3), dtype=np.uint8)])
+        self._infer([np.zeros((height, width, 3), dtype=np.uint8)] * self.batch_size)
 
         self.loads += 1
         self.load_seconds += time.perf_counter() - started

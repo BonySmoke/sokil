@@ -152,6 +152,12 @@ class FakeHailo:
 
             def infer(self, data):
                 batch = data["in"]
+                # as HailoRT does for a multi-context network
+                if len(batch) % fake.batch_size:
+                    raise ValueError(
+                        f"frames count must be a multiple of the batch size "
+                        f"({len(batch)} % {fake.batch_size} != 0)"
+                    )
                 fake.batches.append(batch.shape)
                 return {"nms": [[fake.box] for _ in range(len(batch))]}
 
@@ -204,6 +210,21 @@ class TestHailoShuttleDetector:
         assert fake.batches == [(2, 640, 640, 3), (2, 640, 640, 3)]
         assert len(boxes) == 3
         assert detector.inferences == 3
+
+    def test_the_warm_up_sends_a_whole_batch(self, hailo):
+        fake, model = hailo
+
+        HailoShuttleDetector(model, batch_size=4).load()
+
+        assert fake.batches == [(4, 640, 640, 3)]
+
+    def test_a_single_frame_is_sent_as_a_whole_batch(self, hailo):
+        fake, model = hailo
+        detector = HailoShuttleDetector(model, batch_size=4).load()
+        fake.batches.clear()
+
+        assert detector.best_box(frame()) is not None
+        assert fake.batches == [(4, 640, 640, 3)]
 
     def test_boxes_come_back_in_frame_pixels(self, hailo):
         _, model = hailo

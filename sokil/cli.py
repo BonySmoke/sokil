@@ -122,8 +122,7 @@ def review(
     batch_size: Annotated[
         int,
         typer.Option(
-            min=1,
-            help="Frames per shuttle detector call on a Hailo accelerator"
+            min=1, help="Frames per shuttle detector call on a Hailo accelerator"
         ),
     ] = 2,
     verbose: Annotated[
