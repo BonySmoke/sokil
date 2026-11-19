@@ -119,6 +119,13 @@ def review(
             "and fps) to this JSON file"
         ),
     ] = None,
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            help="Frames per shuttle detector call on a Hailo accelerator"
+        ),
+    ] = 2,
     verbose: Annotated[
         bool, typer.Option(help="Enable debug logging (per-hit verdicts, etc.)")
     ] = False,
@@ -137,6 +144,7 @@ def review(
         ensure_model_path,
         model_spec,
     )
+    from sokil.tracker import TrackerConfig
 
     configure_logging(verbose)
 
@@ -198,6 +206,7 @@ def review(
         ),
         render_config=RenderConfig(output_fps=output_fps, explain=explain),
         court_solver_config=CourtSolverConfig(sample_seconds=court_sample_seconds),
+        tracker_config=TrackerConfig(batch_size=batch_size),
     )
 
     review.stats.start()

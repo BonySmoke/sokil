@@ -24,8 +24,7 @@ from ..dataset.court import (
 )
 from ..dataset.landing import CM_PER_M, court_keyframe
 from ..hits import HitDetectionConfig, HitDetector, HitJudge
-from ..models import ShuttleDetector
-from ..tracker import ShuttleTracker, TrackerConfig
+from ..tracker import ShuttleTracker, TrackerConfig, shuttle_detector
 from ..video import VideoSource
 from .metrics import (
     MATCH_WINDOW_FRAMES,
@@ -208,10 +207,9 @@ def run_shuttle_detector(
         events,
         court_points,
         configuration="shuttle-detector",
-        detector=ShuttleDetector(
+        detector=shuttle_detector(
             shuttle_detector_kwargs["model"],
-            confidence=(kwargs.get("tracker_config") or TrackerConfig()).confidence,
-            device=(kwargs.get("tracker_config") or TrackerConfig()).device,
+            kwargs.get("tracker_config") or TrackerConfig(),
             imgsz=shuttle_detector_kwargs.get("imgsz", 640),
         ),
         court=ground_truth_court(clip_id, clip, court_points),
@@ -244,10 +242,9 @@ def run_automatic(
         events,
         court_points,
         configuration="automatic",
-        detector=ShuttleDetector(
+        detector=shuttle_detector(
             shuttle_detector_kwargs["model"],
-            confidence=(kwargs.get("tracker_config") or TrackerConfig()).confidence,
-            device=(kwargs.get("tracker_config") or TrackerConfig()).device,
+            kwargs.get("tracker_config") or TrackerConfig(),
             imgsz=shuttle_detector_kwargs.get("imgsz", 640),
         ),
         court_solver=CourtSolver(
