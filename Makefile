@@ -54,6 +54,10 @@ docker_run = docker run --rm $(tty_flag) $(mounts) --user $(UID):$(GID) $(IMAGE)
 # --- Hailo image (Raspberry Pi with a Hailo accelerator) ---------------------
 HAILO_BUILD_IMAGE ?= sokil-hailo:dev
 HAILO_REVIEW_IMAGE ?= ghcr.io/bonysmoke/sokil:latest-hailo
+# `sokil evaluate` needs the dataset group, which the published images leave out, 
+# so evaluations run on local builds made with GROUPS=dataset.
+EVAL_IMAGE ?= sokil:eval
+HAILO_EVAL_IMAGE ?= sokil-hailo:eval
 HAILO_DEVICE ?= /dev/hailo0
 # The host's HailoRT, which the image's must match (see docker/hailo/README.md);
 # left unset, the Dockerfile's own versions are built.
@@ -98,6 +102,12 @@ review:  ## Run a review in the container, e.g. make review ARGS="--video-path a
 
 review-hailo:  ## Run a review on a Hailo accelerator, e.g. make review-hailo ARGS="--video-path a.mp4 --output-path b.mp4 …"
 	docker run --rm $(tty_flag) --device $(HAILO_DEVICE) $(mounts) --user $(UID):$(GID) $(HAILO_REVIEW_IMAGE) review $(ARGS)
+
+evaluate:  ## Run an evaluation in the container (build it with make build GROUPS=dataset IMAGE=sokil:eval), e.g. make evaluate ARGS="--configuration manual"
+	docker run --rm $(tty_flag) $(mounts) --user $(UID):$(GID) $(EVAL_IMAGE) evaluate $(ARGS)
+
+evaluate-hailo:  ## Run an evaluation on a Hailo accelerator (build it with make build-hailo GROUPS=dataset HAILO_BUILD_IMAGE=sokil-hailo:eval)
+	docker run --rm $(tty_flag) --device $(HAILO_DEVICE) $(mounts) --user $(UID):$(GID) $(HAILO_EVAL_IMAGE) evaluate $(ARGS)
 
 shell:  ## Open a shell in the application image
 	docker run --rm -it $(mounts) --user $(UID):$(GID) --entrypoint bash $(IMAGE)
