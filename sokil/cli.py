@@ -124,7 +124,7 @@ def review(
         typer.Option(
             min=1, help="Frames per shuttle detector call on a Hailo accelerator"
         ),
-    ] = 2,
+    ] = 16,
     verbose: Annotated[
         bool, typer.Option(help="Enable debug logging (per-hit verdicts, etc.)")
     ] = False,

@@ -246,7 +246,7 @@ class HailoShuttleDetector(Model):
         confidence: float = 0.25,
         device: str | None = None,
         imgsz: int = 640,
-        batch_size: int = 2,
+        batch_size: int = 16,
     ):
         super().__init__(model_path, confidence=confidence, device=device, imgsz=imgsz)
         if batch_size < 1:

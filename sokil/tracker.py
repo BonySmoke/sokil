@@ -33,8 +33,10 @@ class TrackerConfig:
     # useful for background subtraction, cork detection, etc.
     frame_history: int = 8
     # frames per detector call, for detectors that batch (the Hailo one): a
-    # multi-context network reloads the chip once per batch, not per frame
-    batch_size: int = 2
+    # multi-context network reloads the chip once per batch, not per frame.
+    # On a Pi with a Hailo-8, 16 gave ~120 fps detection against ~93 at 2; an
+    # offline review loses nothing by holding 16 frames (133 ms) back.
+    batch_size: int = 16
 
 
 class ShuttleTracker:
