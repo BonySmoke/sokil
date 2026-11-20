@@ -25,8 +25,7 @@ cvat = $(COMPOSE) -f $(CVAT_COMPOSE) $(cvat_share_overlay) --env-file $(CVAT_ENV
 IMAGE ?= sokil:dev
 PLATFORMS ?= linux/amd64,linux/arm64
 # Dependency groups to add to an image, space separated, e.g.
-# make build-hailo GROUPS=dataset HAILO_BUILD_IMAGE=sokil-hailo:eval for an
-# image that can run `sokil evaluate`.
+# make build-hailo GROUPS=dataset HAILO_BUILD_IMAGE=sokil-hailo:eval for an image that can run `sokil evaluate`.
 GROUPS ?=
 groups_arg = $(if $(strip $(GROUPS)),--build-arg UV_GROUPS="$(GROUPS)")
 
