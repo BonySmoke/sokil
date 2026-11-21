@@ -253,6 +253,7 @@ def shuttle_detector(
             imgsz=imgsz,
             batch_size=config.batch_size,
         )
+    
     return ShuttleDetector(
         model_path,
         confidence=config.confidence,
