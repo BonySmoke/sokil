@@ -13,7 +13,7 @@ import numpy as np
 from rich.progress import Progress
 
 from .frame import ShuttleTrack
-from .models import Model, ShuttleDetector
+from .models import HailoShuttleDetector, Model, ShuttleDetector, is_hailo_model
 from .shuttle import DirectionTracker, estimate_cork_position
 from .util import laplacian_blur_metric, signed_angle_change
 from .video import VideoSource
@@ -32,6 +32,11 @@ class TrackerConfig:
     # the number of frames to keep in history.
     # useful for background subtraction, cork detection, etc.
     frame_history: int = 8
+    # frames per detector call, for detectors that batch (the Hailo one): a
+    # multi-context network reloads the chip once per batch, not per frame.
+    # On a Pi with a Hailo-8, 16 gave ~120 fps detection against ~93 at 2; an
+    # offline review loses nothing by holding 16 frames (133 ms) back.
+    batch_size: int = 16
 
 
 class ShuttleTracker:
@@ -59,10 +64,9 @@ class ShuttleTracker:
         if detector is None:
             if detector_kwargs is None:
                 raise ValueError("Give either detector_kwargs or a detector")
-            detector = ShuttleDetector(
+            detector = shuttle_detector(
                 detector_kwargs["model"],
-                confidence=self.config.confidence,
-                device=self.config.device,
+                self.config,
                 imgsz=detector_kwargs.get("imgsz", 640),
             )
 
@@ -82,6 +86,25 @@ class ShuttleTracker:
     def __exit__(self, *exc_info) -> None:
         if isinstance(self.detector, Model):
             self.detector.release()
+
+    def _detect(self, batch: list) -> list:
+        """
+        The best box on each decoded frame, in one call where the detector
+        batches.
+
+        The frame number travels with the image: a detector ignores it, while
+        a source that already knows where the shuttle is needs it to look the
+        frame up rather than predict on it.
+        """
+        images = [decoded.model_input for decoded in batch]
+        frames = [decoded.number for decoded in batch]
+
+        if hasattr(self.detector, "best_boxes"):
+            return self.detector.best_boxes(images, frames=frames)
+        return [
+            self.detector.best_box(image, frame=frame)
+            for image, frame in zip(images, frames, strict=True)
+        ]
 
     def _new_kalman(self) -> cv2.KalmanFilter:
         # 4 dynamic params (x, y, dx, dy), 2 measured (x, y)
@@ -122,85 +145,86 @@ class ShuttleTracker:
         recent_frames = deque(maxlen=self.config.frame_history)
 
         try:
-            for decoded in source:
+            for batch in _batches(source, getattr(self.detector, "batch_size", 1)):
                 start_time = time.perf_counter()
-                progress.advance(progress_task)
-                frame_count += 1
+                detections = self._detect(batch)
 
-                gray = cv2.cvtColor(decoded.image, cv2.COLOR_BGR2GRAY)
-                previous_frames = list(recent_frames)
-                recent_frames.append(gray)
+                for decoded, detection in zip(batch, detections, strict=True):
+                    progress.advance(progress_task)
+                    frame_count += 1
 
-                # The frame number travels with the image: a detector ignores
-                # it, while a source that already knows where the shuttle is
-                # needs it to look the frame up rather than predict on it.
-                detection = self.detector.best_box(
-                    decoded.model_input, frame=decoded.number
-                )
+                    gray = cv2.cvtColor(decoded.image, cv2.COLOR_BGR2GRAY)
+                    previous_frames = list(recent_frames)
+                    recent_frames.append(gray)
 
-                # the shuttle has not been found
-                if detection is None:
-                    continue
+                    # the shuttle has not been found
+                    if detection is None:
+                        continue
 
-                (
                     (
-                        top_left_x,
-                        top_left_y,
-                        bottom_right_x,
-                        bottom_right_y,
-                    ),
-                    _,
-                ) = detection
+                        (
+                            top_left_x,
+                            top_left_y,
+                            bottom_right_x,
+                            bottom_right_y,
+                        ),
+                        _,
+                    ) = detection
 
-                center_x = (top_left_x + bottom_right_x) / 2
-                center_y = (top_left_y + bottom_right_y) / 2
+                    center_x = (top_left_x + bottom_right_x) / 2
+                    center_y = (top_left_y + bottom_right_y) / 2
 
-                angle_degree_change = 0.0
-                previous_centers = [track.bbox_center for track in tracks[-2:]]
-                if len(previous_centers) == 2:
-                    angle_degree_change = signed_angle_change(
-                        p1=previous_centers[0],
-                        p2=previous_centers[1],
-                        p3=(center_x, center_y),
+                    angle_degree_change = 0.0
+                    previous_centers = [track.bbox_center for track in tracks[-2:]]
+                    if len(previous_centers) == 2:
+                        angle_degree_change = signed_angle_change(
+                            p1=previous_centers[0],
+                            p2=previous_centers[1],
+                            p3=(center_x, center_y),
+                        )
+
+                    measurement = np.array(
+                        [[np.float32(center_x)], [np.float32(center_y)]]
+                    )
+                    kalman.predict()
+                    kalman.correct(measurement)
+
+                    velocity_x, velocity_y = (
+                        kalman.statePost[2, 0],
+                        kalman.statePost[3, 0],
+                    )
+                    kalman_speed = float(np.sqrt(velocity_x**2 + velocity_y**2))
+
+                    ema_vx, ema_vy = direction_tracker.update(center_x, center_y)
+
+                    xyxy = (
+                        int(top_left_x),
+                        int(top_left_y),
+                        int(bottom_right_x),
+                        int(bottom_right_y),
                     )
 
-                measurement = np.array([[np.float32(center_x)], [np.float32(center_y)]])
-                kalman.predict()
-                kalman.correct(measurement)
-
-                velocity_x, velocity_y = kalman.statePost[2, 0], kalman.statePost[3, 0]
-                kalman_speed = float(np.sqrt(velocity_x**2 + velocity_y**2))
-
-                ema_vx, ema_vy = direction_tracker.update(center_x, center_y)
-
-                xyxy = (
-                    int(top_left_x),
-                    int(top_left_y),
-                    int(bottom_right_x),
-                    int(bottom_right_y),
-                )
-
-                measured_cork = estimate_cork_position(
-                    gray,
-                    previous_frames,
-                    xyxy,
-                    (ema_vx, ema_vy),
-                )
-
-                tracks.append(
-                    ShuttleTrack(
-                        number=decoded.number,
-                        xyxy=xyxy,
-                        speed=kalman_speed,
-                        angle_change=angle_degree_change,
-                        velocity=(ema_vx, ema_vy),
-                        timestamp=decoded.timestamp,
-                        blur=laplacian_blur_metric(decoded.image, xyxy),
-                        measured_cork=measured_cork,
+                    measured_cork = estimate_cork_position(
+                        gray,
+                        previous_frames,
+                        xyxy,
+                        (ema_vx, ema_vy),
                     )
-                )
 
-                execution_times.append(time.perf_counter() - start_time)
+                    tracks.append(
+                        ShuttleTrack(
+                            number=decoded.number,
+                            xyxy=xyxy,
+                            speed=kalman_speed,
+                            angle_change=angle_degree_change,
+                            velocity=(ema_vx, ema_vy),
+                            timestamp=decoded.timestamp,
+                            blur=laplacian_blur_metric(decoded.image, xyxy),
+                            measured_cork=measured_cork,
+                        )
+                    )
+
+                execution_times.append((time.perf_counter() - start_time) / len(batch))
         finally:
             progress.stop()
             self.frames_processed = frame_count
@@ -216,3 +240,35 @@ class ShuttleTracker:
         )
 
         return tracks
+
+
+def shuttle_detector(
+    model_path: str, config: TrackerConfig, imgsz: int = 640
+) -> ShuttleDetector:
+    """The detector for a model path: HailoRT for a HEF, Ultralytics otherwise."""
+    if is_hailo_model(model_path):
+        return HailoShuttleDetector(
+            model_path,
+            confidence=config.confidence,
+            imgsz=imgsz,
+            batch_size=config.batch_size,
+        )
+
+    return ShuttleDetector(
+        model_path,
+        confidence=config.confidence,
+        device=config.device,
+        imgsz=imgsz,
+    )
+
+
+def _batches(source, size: int):
+    """Decoded frames in lists of up to `size`, in decode order."""
+    batch = []
+    for decoded in source:
+        batch.append(decoded)
+        if len(batch) == size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
